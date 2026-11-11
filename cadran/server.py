@@ -401,7 +401,7 @@ async def disconnect(request: Request):
 
 FILES = {"/": "index.html", "/index.html": "index.html",
          "/manifest.webmanifest": "manifest.webmanifest", "/icon.svg": "icon.svg",
-         "/sw.js": "sw.js"}
+         "/sw.js": "sw.js", "/privacy.html": "privacy.html", "/terms.html": "terms.html"}
 HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 try:
     INLINE_JS = HTML.split("<script>", 1)[1].split("</script>", 1)[0]
