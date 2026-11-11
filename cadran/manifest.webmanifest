@@ -1,0 +1,19 @@
+{
+  "name": "Cadran — Comptes et budget",
+  "short_name": "Cadran",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f8fb",
+  "theme_color": "#101b31",
+  "lang": "fr",
+  "description": "Vos comptes, budgets et prévisions",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
