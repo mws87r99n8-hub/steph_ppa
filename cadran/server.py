@@ -205,7 +205,9 @@ def sanitize_manual_state(value: dict) -> dict:
     ids = {str(a.get("id")) for a in accounts}
     txns = [t for t in value.get("transactions", []) if isinstance(t, dict)
             and t.get("source") != "enablebanking"
-            and str(t.get("accountId")) in ids]
+            and (str(t.get("accountId")) in ids or
+                 (str(t.get("accountId", "")).startswith("eb-") and
+                  len(str(t.get("accountId", ""))) == 67))]
     recurring = [r for r in value.get("recurring", []) if isinstance(r, dict)
                  and (str(r.get("accountId", "")) in ids or
                       (str(r.get("accountId", "")).startswith("eb-") and
