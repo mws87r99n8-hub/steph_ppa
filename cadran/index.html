@@ -1,9 +1,0 @@
-<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow,noarchive"><meta http-equiv="Cache-Control" content="no-store"><title></title></head><body><script>
-(async()=>{
-  try{localStorage.clear()}catch(e){}
-  try{sessionStorage.clear()}catch(e){}
-  try{if("serviceWorker" in navigator){const registrations=await navigator.serviceWorker.getRegistrations();await Promise.all(registrations.map(r=>r.unregister()))}}catch(e){}
-  try{if("caches" in window){const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)))}}catch(e){}
-  try{document.body.replaceChildren()}catch(e){}
-})();
-</script></body></html>
