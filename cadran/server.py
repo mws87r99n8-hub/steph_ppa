@@ -17,6 +17,7 @@ import os
 import secrets
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -45,7 +46,25 @@ LOGIN_TTL = 4 * 3600
 CONSENT_TTL = 90 * 86400
 LOGGER = logging.getLogger("cadran")
 ATTEMPTS: dict[str, deque] = defaultdict(deque)
-app = FastAPI(title="Cadran", docs_url=None, redoc_url=None, openapi_url=None)
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    if storage.configured():
+        try:
+            ready = await asyncio.to_thread(storage.self_test)
+            if ready:
+                LOGGER.warning("Cadran encrypted PostgreSQL read-write check: OK")
+            else:
+                LOGGER.error("Cadran encrypted PostgreSQL read-write check: FAILED")
+        except Exception:
+            # Avoid logging database credentials or financial records on failure.
+            LOGGER.error("Cadran encrypted PostgreSQL read-write check: FAILED")
+    else:
+        LOGGER.warning("Cadran PostgreSQL not configured: missing environment credentials")
+    yield
+
+
+app = FastAPI(title="Cadran", docs_url=None, redoc_url=None,
+              openapi_url=None, lifespan=app_lifespan)
 
 def configured() -> bool:
     return bool(PUBLIC_URL.startswith("https://") and len(APP_PASSWORD) >= 12
