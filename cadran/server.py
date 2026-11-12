@@ -246,6 +246,17 @@ def sanitize_manual_state(value: dict) -> dict:
             "reconciled": bool(entry.get("reconciled", False)),
             "splits": entry.get("splits", [])[:30] if isinstance(entry.get("splits"), list) else [],
         }
+    original_aliases = value.get("bankAliases") or {}
+    if not isinstance(original_aliases, dict) or len(original_aliases) > 300:
+        raise HTTPException(413, "Trop de noms de comptes bancaires.")
+    bank_aliases = {}
+    for ref, alias in original_aliases.items():
+        if (isinstance(ref, str) and len(ref) == 64 and
+                all(c in "0123456789abcdef" for c in ref) and
+                isinstance(alias, str)):
+            name = " ".join(alias.split()).strip()
+            if name:
+                bank_aliases[ref] = name[:70]
     if len(accounts) > 300 or len(txns) > 30000 or len(recurring) > 10000:
         raise HTTPException(413, "Trop d'enregistrements pour cette sauvegarde.")
     return {
@@ -256,6 +267,7 @@ def sanitize_manual_state(value: dict) -> dict:
         "settings": value.get("settings", {"hidden": False}),
         "imported": value.get("imported", []),
         "bankOverrides": bank_overrides,
+        "bankAliases": bank_aliases,
     }
 
 
