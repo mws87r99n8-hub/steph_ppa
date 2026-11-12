@@ -477,6 +477,24 @@ def normalized_tx(tx: dict, account_id: str) -> dict | None:
             "provider_description": merchant[:160], "future": False, "deleted": False,
             "currency_code": "EUR"}
 
+def classify_bank_account(detail: dict) -> str:
+    """Map bank-provided ISO cash account types to Cadran UI categories."""
+    raw = str(detail.get("cash_account_type") or "").strip().upper()
+    types = {"SVGS": "savings", "CACC": "checking", "CASH": "checking",
+             "CARD": "card", "LOAN": "loan"}
+    if raw in types:
+        return types[raw]
+    # Product labels are bank-supplied and can identify savings even when
+    # the generic cash-account type is OTHR or absent.
+    product = " ".join(str(detail.get(k) or "") for k in ("product", "details", "name")).upper()
+    if any(term in product for term in (
+        "LIVRET", "ÉPARGNE", "EPARGNE", "LDDS", "LDD ",
+        " LEP ", "PEL ", "COMPTE SUR LIVRET", "PLAN ÉPARGNE", "PLAN EPARGNE"
+    )):
+        return "savings"
+    return "other" if raw == "OTHR" else "checking"
+
+
 @app.post("/api/bank/sync")
 async def sync(request: Request):
     consent = await require_consent(request)
@@ -522,19 +540,27 @@ async def sync(request: Request):
         )
     accounts, transactions, seen = [], [], set()
     rejected_currencies = defaultdict(int)
+    coverage = {"authorized": len(authorized), "included": 0,
+                "savings": 0, "savingsWithoutBalance": 0,
+                "savingsTransactionsUnavailable": 0, "otherWithoutBalance": 0,
+                "foreignCurrencySkipped": 0}
     date_from = (datetime.now(timezone.utc) - timedelta(days=89)).date().isoformat()
     for uid, mapping in list(authorized.items())[:30]:
         public_account_id = global_id(str(mapping.get("identification_hash") or uid))
         detail = await eb("GET", f"/accounts/{uid}/details")
-        # The account-level currency can legitimately be XXX (unspecified or
-        # multi-currency). In that case, use the explicit balance currency:
-        # XXX must never be interpreted automatically as EUR.
+        account_type = classify_bank_account(detail)
         currency = normalized_currency(detail.get("currency"))
         if currency not in ("EUR", "XXX", ""):
             rejected_currencies[currency] += 1
+            coverage["foreignCurrencySkipped"] += 1
             continue
-        balances = await eb("GET", f"/accounts/{uid}/balances")
-        items = balances.get("balances", [])
+        try:
+            balances = await eb("GET", f"/accounts/{uid}/balances")
+            items = balances.get("balances", [])
+        except HTTPException as exc:
+            if account_type != "savings" or exc.status_code != 502:
+                raise
+            items = []
         if not isinstance(items, list):
             raise HTTPException(502, "Format des soldes bancaires non reconnu.")
         euro_balances = [
@@ -547,44 +573,73 @@ async def sync(request: Request):
             for b in euro_balances if b.get("balance_type") == kind
         ), euro_balances[0] if euro_balances else None)
         if selected is None:
-            # A bank can expose several currencies. Skip only this account
-            # instead of making all other authorized EUR accounts unavailable.
             codes = {
                 normalized_currency(b.get("balance_amount", {}).get("currency"))
                 for b in items if isinstance(b, dict)
                 and isinstance(b.get("balance_amount"), dict)
             }
-            for code in codes or {currency or "INCONNUE"}:
-                rejected_currencies[code or "INCONNUE"] += 1
-            continue
-        balance = safe_money((selected.get("balance_amount") or {}).get("amount"))
-        accounts.append({"id": public_account_id,
-                         "name": str(detail.get("name") or "Compte Société Générale")[:100],
-                         "bank": "Société Générale",
-                         "balance": balance, "type": str(detail.get("cash_account_type") or "checking"),
-                         "currency_code": "EUR", "updated_at": datetime.now(timezone.utc).date().isoformat()})
-        key = None
-        for _ in range(40):
-            params = {"date_from": date_from, "transaction_status": "BOOK"}
-            if key:
-                params["continuation_key"] = key
-            chunk = await eb("GET", f"/accounts/{uid}/transactions", params=params)
-            rows = chunk.get("transactions") or []
-            if not isinstance(rows, list):
-                raise HTTPException(502, "Opérations bancaires incorrectes.")
-            for tx in rows:
-                item = normalized_tx(tx, public_account_id)
-                if item and item["id"] not in seen:
-                    transactions.append(item)
-                    seen.add(item["id"])
-            nxt = chunk.get("continuation_key")
-            if not nxt:
-                break
-            if nxt == key:
-                raise HTTPException(502, "Pagination bancaire interrompue.")
-            key = nxt
+            foreign = {code for code in codes if code not in ("EUR", "XXX", "")}
+            if foreign:
+                for code in foreign:
+                    rejected_currencies[code] += 1
+                coverage["foreignCurrencySkipped"] += 1
+                continue
+            if account_type != "savings":
+                coverage["otherWithoutBalance"] += 1
+                continue
+            # Savings accounts sometimes lack balance and transaction APIs.
+            # Show the bank-confirmed account but NEVER invent a zero EUR balance.
+            balance = None
+            balance_available = False
+            coverage["savingsWithoutBalance"] += 1
         else:
-            raise HTTPException(502, "Trop de pages de transactions bancaires.")
+            balance = safe_money((selected.get("balance_amount") or {}).get("amount"))
+            balance_available = True
+        accounts.append({
+            "id": public_account_id,
+            "name": str(detail.get("name") or detail.get("product") or "Compte Société Générale")[:100],
+            "bank": "Société Générale",
+            "balance": balance,
+            "balance_available": balance_available,
+            "type": account_type,
+            "bank_account_type": str(detail.get("cash_account_type") or "")[:12],
+            "currency_code": "EUR" if balance_available or currency == "EUR" else "XXX",
+            "updated_at": datetime.now(timezone.utc).date().isoformat(),
+        })
+        coverage["included"] += 1
+        if account_type == "savings":
+            coverage["savings"] += 1
+        try:
+            key = None
+            for _ in range(40):
+                params = {"date_from": date_from, "transaction_status": "BOOK"}
+                if key:
+                    params["continuation_key"] = key
+                chunk = await eb("GET", f"/accounts/{uid}/transactions", params=params)
+                rows = chunk.get("transactions") or []
+                if not isinstance(rows, list):
+                    raise HTTPException(502, "Opérations bancaires incorrectes.")
+                for tx in rows:
+                    item = normalized_tx(tx, public_account_id)
+                    if item and item["id"] not in seen:
+                        transactions.append(item)
+                        seen.add(item["id"])
+                nxt = chunk.get("continuation_key")
+                if not nxt:
+                    break
+                if nxt == key:
+                    raise HTTPException(502, "Pagination bancaire interrompue.")
+                key = nxt
+            else:
+                raise HTTPException(502, "Trop de pages de transactions bancaires.")
+        except HTTPException as exc:
+            # An inaccessible savings transaction history should not prevent
+            # a visible and verified savings account from being synchronized.
+            if account_type != "savings" or exc.status_code not in (429, 502):
+                raise
+            coverage["savingsTransactionsUnavailable"] += 1
+            LOGGER.warning("Savings transaction history not available (HTTP %s)",
+                           exc.status_code)
     if not accounts:
         if rejected_currencies:
             summary = ", ".join(f"{code} ({count})" for code, count in sorted(rejected_currencies.items()))
@@ -598,7 +653,8 @@ async def sync(request: Request):
     result = {"source": "Enable Banking", "accounts": accounts,
               "transactions": transactions, "lastSync": int(time.time()),
               "consentValidUntil": consent.get("valid_until"),
-              "periodStart": date_from}
+              "periodStart": date_from,
+              "coverage": coverage}
     if storage.configured():
         try:
             await asyncio.to_thread(storage.write, "bank", result)
