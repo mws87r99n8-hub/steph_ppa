@@ -182,6 +182,145 @@ function upcomingEntries(days=90){const start=isoDay(),end=moveDay(start,days),a
 function forecastSeries(days=60){const arr=upcomingEntries(days);let balance=allBalance(),vals=[balance],labels=[isoDay()];for(let i=1;i<=days;i++){const d=moveDay(isoDay(),i);balance=round(balance+arr.filter(r=>r.occurrence===d).reduce((s,r)=>s+num(r.amount),0));vals.push(balance);labels.push(d)}return {vals,labels}}
 function rowTransaction(t,withActions=true){const c=t.splits?.length?`${t.category} · ${t.splits.length} postes`:t.category;return `<div class="transaction-row">${categoryAvatar(t.category)}<div class="txn-main"><div class="txn-title">${h(t.merchant)}</div><div class="txn-sub">${h(c)} · ${h(accName(t.accountId))} · ${formatDate(t.date)} ${t.reconciled?'✓ Pointée':''}</div></div><div class="txn-amount ${t.amount>=0?'positive':'negative'}">${t.amount>0?'+ ':t.amount===0?'':'− '}${money(Math.abs(t.amount))}</div>${withActions?`<div class="txn-actions"><button class="txn-action" data-action="edit-transaction" data-id="${h(t.id)}" title="Modifier">${ico('edit')}</button><button class="txn-action" data-action="toggle-reconcile" data-id="${h(t.id)}" title="Pointer / Dépointer">${ico('check')}</button></div>`:''}</div>`}
 function groupedRows(list){if(!list.length)return `<div class="empty">Aucune opération pour les filtres sélectionnés.</div>`;let previous='';return list.map(t=>{const heading=t.date!==previous?`<div class="group-date">${formatDate(t.date,true)}</div>`:'';previous=t.date;return heading+rowTransaction(t)}).join('')}
+
+let analysisAccount='all',analysisCandidates=[];
+const ANALYSIS_PERIODS={weekly:{label:'Hebdomadaire',days:7,annual:52},biweekly:{label:'Toutes les 2 semaines',days:14,annual:26},monthly:{label:'Mensuelle',days:30,annual:12},quarterly:{label:'Trimestrielle',days:91,annual:4},yearly:{label:'Annuelle',days:365,annual:1}};
+function expenseRowsForAnalysis(period=null,account='all'){
+  return db.transactions.filter(t=>t&&!t.deleted&&!t.future&&num(t.amount)<0&&t.category!=='Virement'&&!t.linkedTransfer&&(account==='all'||t.accountId===account)&&(!period||monthKey(t.date)===period));
+}
+function expenseTotalForAnalysis(rows){return round(rows.reduce((total,t)=>total+Math.abs(num(t.amount)),0))}
+function categoryTotalsForAnalysis(rows){
+  const amounts=new Map();
+  for(const t of rows){
+    const sum=Math.abs(num(t.amount));
+    const splits=Array.isArray(t.splits)?t.splits.filter(x=>num(x.amount)>0):[];
+    const splitTotal=splits.reduce((a,x)=>a+num(x.amount),0);
+    const parts=(splits.length&&Math.abs(splitTotal-sum)<0.06)?splits.map(x=>[String(x.category||'Autres'),num(x.amount)]):[[String(t.category||'Autres'),sum]];
+    for(const [cat,amount] of parts)amounts.set(cat,(amounts.get(cat)||0)+amount);
+  }
+  return [...amounts.entries()].map(([name,amount])=>({name,amount:round(amount)})).sort((a,b)=>b.amount-a.amount);
+}
+function accountTotalsForAnalysis(rows){
+  const data=new Map();
+  for(const t of rows){
+    const entry=data.get(t.accountId)||{id:t.accountId,amount:0,count:0};
+    entry.amount+=Math.abs(num(t.amount));entry.count++;data.set(t.accountId,entry);
+  }
+  return [...data.values()].map(x=>({...x,name:accName(x.id),amount:round(x.amount)})).sort((a,b)=>b.amount-a.amount);
+}
+function normalizeRecurringMerchant(text){
+  const raw=String(text||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase();
+  const name=raw.replace(/\b(?:PRELEVEMENT|PRELEV|PRLV|VIREMENT|VIR|SEPA|CB|CARTE|PAIEMENT|FACTURE|ABONNEMENT|ECHEANCE|ACHAT|DU|DE|DES|LE|LA|LES)\b/g,' ')
+    .replace(/[0-9]+[A-Z0-9\-\/.]*/g,' ')
+    .replace(/[^A-Z ]/g,' ').replace(/\s+/g,' ').trim().split(' ').slice(0,5).join(' ');
+  return name.length>=4&&!['BANQUE','SOCIETE GENERALE','RETRAIT','INCONNU','OPERATION BANCAIRE','PAYPAL'].includes(name)?name:'';
+}
+function daysBetweenAnalysis(a,b){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(a)||!/^\d{4}-\d{2}-\d{2}$/.test(b))return NaN;
+  const da=new Date(a+'T12:00:00Z'),dbb=new Date(b+'T12:00:00Z');
+  return Math.round((dbb.getTime()-da.getTime())/86400000);
+}
+function monthsBetweenAnalysis(a,b){return (Number(b.slice(0,4))-Number(a.slice(0,4)))*12+Number(b.slice(5,7))-Number(a.slice(5,7))}
+function detectRecurrenceCadence(dates){
+  if(dates.length<3)return null;
+  const recent=dates.slice(-4),gaps=[];
+  for(let i=1;i<recent.length;i++)gaps.push(daysBetweenAnalysis(recent[i-1],recent[i]));
+  if(gaps.some(g=>!Number.isFinite(g)||g<=0))return null;
+  if(gaps.every(g=>g>=6&&g<=8))return 'weekly';
+  if(gaps.every(g=>g>=12&&g<=16))return 'biweekly';
+  const mg=recent.slice(1).map((d,i)=>monthsBetweenAnalysis(recent[i],d));
+  if(mg.every((g,i)=>g===1&&gaps[i]>=24&&gaps[i]<=37))return 'monthly';
+  if(mg.every((g,i)=>g===3&&gaps[i]>=80&&gaps[i]<=104))return 'quarterly';
+  if(mg.every((g,i)=>g===12&&gaps[i]>=350&&gaps[i]<=380))return 'yearly';
+  return null;
+}
+function forecastRecurrenceDate(last,kind){
+  const base=fromDay(last),now=fromDay(isoDay()),day=base.getDate();
+  let candidate=new Date(base.getTime());
+  const step={monthly:1,quarterly:3,yearly:12}[kind]||0;
+  for(let i=1;i<=48;i++){
+    if(step){
+      const monthStart=new Date(base.getFullYear(),base.getMonth()+step*i,1);
+      const lastDay=new Date(monthStart.getFullYear(),monthStart.getMonth()+1,0).getDate();
+      candidate=new Date(monthStart.getFullYear(),monthStart.getMonth(),Math.min(day,lastDay),12);
+    }else{candidate=new Date(base.getFullYear(),base.getMonth(),base.getDate()+ANALYSIS_PERIODS[kind].days*i,12)}
+    if(candidate>now)return isoDay(candidate);
+  }
+  return null;
+}
+function findExpenseRecurrences(account='all'){
+  const grouped=new Map();
+  for(const t of expenseRowsForAnalysis(null,account)){
+    const merchant=normalizeRecurringMerchant(t.merchant);
+    if(!merchant||Math.abs(num(t.amount))<1||!/^\d{4}-\d{2}-\d{2}$/.test(String(t.date||'')))continue;
+    const key=String(t.accountId)+'|'+merchant;
+    if(!grouped.has(key))grouped.set(key,[]);
+    grouped.get(key).push(t);
+  }
+  const output=[];
+  for(const rows of grouped.values()){
+    rows.sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    const unique=[],seen=new Set();
+    for(const t of rows){
+      const signature=t.date+'|'+round(Math.abs(num(t.amount)));
+      if(!seen.has(signature)){unique.push(t);seen.add(signature)}
+    }
+    if(unique.length<3)continue;
+    const cadence=detectRecurrenceCadence(unique.map(t=>t.date));
+    if(!cadence)continue;
+    const recent=unique.slice(-4),values=recent.map(t=>Math.abs(num(t.amount))).sort((a,b)=>a-b);
+    const median=(values[Math.floor((values.length-1)/2)]+values[Math.floor(values.length/2)])/2;
+    if(median<=0)continue;
+    const maxDeviation=Math.max(...values.map(v=>Math.abs(v-median)))/median;
+    if(maxDeviation>0.45)continue;
+    const latest=recent.at(-1),m=normalizeRecurringMerchant(latest.merchant);
+    const programmed=db.recurring.some(e=>e.accountId===latest.accountId&&num(e.amount)<0&&normalizeRecurringMerchant(e.merchant)===m);
+    output.push({
+      accountId:latest.accountId,merchant:latest.merchant,category:latest.category||'Autres',
+      cadence,amount:round(median),variable:maxDeviation>0.12,
+      lastDate:latest.date,nextDate:forecastRecurrenceDate(latest.date,cadence),
+      occurrences:unique.length,programmed
+    });
+  }
+  return output.sort((a,b)=>b.amount-a.amount||b.lastDate.localeCompare(a.lastDate));
+}
+function renderAnalytics(){
+  if(analysisAccount!=='all'&&!db.accounts.some(a=>a.id===analysisAccount))analysisAccount='all';
+  const rows=expenseRowsForAnalysis(month,analysisAccount),total=expenseTotalForAnalysis(rows);
+  const previous=expenseTotalForAnalysis(expenseRowsForAnalysis(monthMove(month,-1),analysisAccount));
+  const delta=previous>0?((total-previous)/previous*100):null;
+  const accounts=accountTotalsForAnalysis(rows),categories=categoryTotalsForAnalysis(rows);
+  const periods=Array.from({length:6},(_,i)=>monthMove(month,i-5));
+  const trend=periods.map(p=>({period:p,amount:expenseTotalForAnalysis(expenseRowsForAnalysis(p,analysisAccount))}));
+  const maxTrend=Math.max(1,...trend.map(x=>x.amount)),maxAccount=Math.max(1,...accounts.map(x=>x.amount)),maxCategory=Math.max(1,...categories.map(x=>x.amount));
+  const suggestions=findExpenseRecurrences(analysisAccount);
+  analysisCandidates=suggestions;
+  const known=db.recurring.filter(r=>num(r.amount)<0&&(analysisAccount==='all'||r.accountId===analysisAccount));
+  const select='<label class="analysis-filter">Compte <select id="analysis-account" aria-label="Compte à analyser"><option value="all">Tous les comptes</option>'
+    +db.accounts.map(a=>'<option value="'+h(a.id)+'" '+(analysisAccount===a.id?'selected':'')+'>'+h(a.name)+'</option>').join('')+'</select></label>';
+  const empty='<div class="analysis-empty">Aucune dépense comptabilisée sur cette période pour ce compte.</div>';
+  const accountBars=accounts.length?accounts.map(a=>`<button class="analysis-row analysis-account-row" type="button" data-action="analysis-choose-account" data-account="${h(a.id)}"><span class="analysis-row-label"><strong>${h(a.name)}</strong><small>${a.count} opération(s) · ${total?Math.round(a.amount/total*100):0} % du total</small></span><span class="analysis-track"><span style="width:${Math.max(1,a.amount/maxAccount*100).toFixed(1)}%"></span></span><b>${money(a.amount)}</b></button>`).join(''):empty;
+  const categoryBars=categories.length?categories.map(a=>`<div class="analysis-row"><span class="analysis-row-label"><strong>${h(a.name)}</strong><small>${total?Math.round(a.amount/total*100):0} % du total</small></span><span class="analysis-track"><span style="width:${Math.max(1,a.amount/maxCategory*100).toFixed(1)}%"></span></span><b>${money(a.amount)}</b></div>`).join(''):empty;
+  const trendBars=trend.map(x=>`<div class="analysis-trend-item"><span class="analysis-trend-value">${x.amount?money(x.amount):'—'}</span><div class="analysis-trend-track"><div class="analysis-trend-bar" style="height:${x.amount?Math.max(3,x.amount/maxTrend*100).toFixed(1):0}%"></div></div><span class="analysis-trend-period">${h(fmtMonth.format(fromDay(x.period+'-01')).slice(0,3))} ${x.period.slice(2,4)}</span></div>`).join('');
+  const suggestedMarkup=suggestions.length?suggestions.slice(0,12).map((a,i)=>`<div class="analysis-repeat"><div class="analysis-repeat-top"><div><strong>${h(a.merchant)}</strong><small>${h(accName(a.accountId))} · ${a.occurrences} paiements</small></div><b>${money(a.amount)}</b></div><div class="analysis-repeat-bottom"><span class="analysis-frequency">${h(ANALYSIS_PERIODS[a.cadence].label)}</span><span>${a.variable?'Montant variable':'Montant régulier'}</span><span>Prochaine date estimée : ${a.nextDate?h(formatDate(a.nextDate)):'indisponible'}</span>${a.programmed?'<span class="analysis-programmed">Déjà programmée</span>':`<button type="button" class="btn btn-light btn-sm" data-action="analysis-program" data-index="${i}">Programmer</button>`}</div></div>`).join(''):'<div class="analysis-empty">Aucune récurrence suffisamment régulière détectée. La détection nécessite au moins 3 paiements comparables sur un même compte.</div>';
+  const scheduledMarkup=known.length?known.slice(0,10).map(r=>`<div class="analysis-scheduled"><div><strong>${h(r.merchant)}</strong><small>${h(accName(r.accountId))} · ${h(FREQ[r.frequency]||r.frequency)}</small></div><b>${money(Math.abs(num(r.amount)))}</b></div>`).join(''):'<div class="analysis-empty">Aucune dépense récurrente programmée.</div>';
+  return `${header('Analyse des dépenses','Comptes, catégories, évolution et paiements réguliers','','ANALYSE FINANCIÈRE')}
+    <div class="analysis-toolbar">${monthPicker()}${select}</div>
+    <div class="analysis-kpis">
+      <section class="analysis-kpi"><small>Dépenses du mois</small><strong>${money(total)}</strong><span>${rows.length} opération(s) · hors virements internes</span></section>
+      <section class="analysis-kpi"><small>Évolution par rapport au mois précédent</small><strong class="${delta===null?'':delta>0?'analysis-rise':'analysis-fall'}">${delta===null?'—':(delta>0?'+':'')+delta.toFixed(1)+' %'}</strong><span>${previous?money(previous)+' le mois précédent':'Aucune dépense le mois précédent'}</span></section>
+      <section class="analysis-kpi"><small>Comptes avec dépenses</small><strong>${accounts.length}</strong><span>${categories.length} catégorie(s) de dépenses</span></section>
+    </div>
+    <div class="analysis-grid">
+      <section class="card card-pad"><div class="section-header"><h2>Dépenses par compte</h2></div><div class="analysis-rows">${accountBars}</div></section>
+      <section class="card card-pad"><div class="section-header"><h2>Répartition par catégorie</h2></div><div class="analysis-rows">${categoryBars}</div></section>
+    </div>
+    <section class="card card-pad"><div class="section-header"><h2>Évolution des dépenses · 6 mois</h2></div><div class="analysis-trend" role="img" aria-label="Dépenses mensuelles en euros pour les six derniers mois">${trendBars}</div><p class="footnote">Montants dépensés hors virements internes. Les mois sans historique chargé ne représentent pas nécessairement zéro dépense réelle.</p></section>
+    <div class="analysis-grid">
+      <section class="card card-pad"><div class="section-header"><h2>Récurrences détectées</h2><span class="mini-tag">${suggestions.length} suggestion(s)</span></div><div class="analysis-repeat-list">${suggestedMarkup}</div><p class="footnote">Détection indicative à partir d’au moins 3 paiements passés à intervalle régulier, chez un même bénéficiaire et sur le même compte. Les montants et dates à venir sont des estimations, jamais des prélèvements confirmés.</p></section>
+      <section class="card card-pad"><div class="section-header"><h2>Échéances programmées</h2><span class="mini-tag">${known.length}</span></div><div class="analysis-repeat-list">${scheduledMarkup}</div><p class="footnote">Les suggestions ne deviennent des échéances qu'après validation du formulaire « Programmer ».</p></section>
+    </div>`;
+}
 function renderOverview(){const inc=incoming(currentMonth()),out=outgoings(currentMonth()),delta=inc-out,total=allBalance();const cats=byCategory(currentMonth()).slice(0,5),max=Math.max(1,...cats.map(c=>c[1]));const txns=[...db.transactions].sort(dateSort).slice(0,5);const next=upcomingEntries(30);const netNext=round(next.reduce((s,r)=>s+r.amount,0));return `${header('Bonjour 👋','Gardez un œil sur votre situation financière.',`${btn('Connexion bancaire','bank-module','btn-mint','bank')} ${btn('Nouvelle opération','add-transaction','btn-dark','plus')}`)}<div class="layout-summary"><section class="overview-hero"><div class="hero-top"><div><div class="hero-label"><span class="status-dot"></span>Solde de tous vos comptes</div><div class="hero-balance">${money(total)}</div><div class="hero-description">${db.accounts.length} compte${db.accounts.length>1?'s':''} suivi${db.accounts.length>1?'s':''} ${db.demo?'· Données fictives':''}</div></div><span class="hero-trend">${netNext>=0?'+ ':''}${shortMoney(netNext)} à venir</span></div><div class="hero-footer"><div class="hero-metrics"><div><div class="hero-metric-label">Disponible ce mois</div><div class="hero-metric-number">${money(delta)}</div></div><div><div class="hero-metric-label">Échéances à venir</div><div class="hero-metric-number">${next.length}</div></div></div><div class="hero-visual">${spanChart(computeTrend(),'#bde58c',false)}</div></div></section><div class="side-stack"><div class="card metric-card"><div><div class="metric-title">Entrées ce mois</div><div class="metric-value positive-money">+ ${money(inc)}</div><div class="metric-hint">Hors virements internes</div></div><div class="metric-icon income">${ico('download')}</div></div><div class="card metric-card"><div><div class="metric-title">Sorties ce mois</div><div class="metric-value">− ${money(out)}</div><div class="metric-hint">Hors virements internes</div></div><div class="metric-icon expense">${ico('upload')}</div></div></div></div><div class="grid-2"><section class="card card-pad"><div class="section-header"><h2>Dernières opérations</h2><button class="section-link" data-view="transactions">Tout voir ${ico('arrow-right')}</button></div>${txns.length?`<div class="transactions-list">${txns.map(t=>rowTransaction(t,false)).join('')}</div>`:'<div class="empty">Vos opérations apparaîtront ici.</div>'}</section><section class="card card-pad"><div class="section-header"><h2>Répartition des dépenses</h2><span class="sub">${h(fmtMonth.format(fromDay(currentMonth()+'-01')))}</span></div>${cats.length?cats.map(([cat,value])=>`<div class="category-row">${categoryIcon(cat)}<div class="category-name">${h(cat)}<div class="category-progress"><div style="width:${Math.max(2,pct(value,max))}%;background:${CATEGORIES[cat]?.bar||'#a6b6c7'}"></div></div></div><div class="category-sum money-val">${money(value)}</div></div>`).join(''):'<div class="empty">Aucune dépense ce mois.</div>'}<div style="margin-top:18px">${btn('Gérer mes budgets','go-budgets','btn-light','chart')}</div></section></div>${db.demo?`<div class="info-panel mt-20">${ico('spark')}<div><strong>Vous explorez une démonstration</strong>Les comptes, les transactions et les soldes affichés sont fictifs. Pour passer à votre budget, <button class="btn-plain" data-action="clear-demo">commencez avec vos propres données</button>.</div></div>`:''}`}
 function renderTransactions(){const actions=`${btn('Importer un relevé','import-bank','btn-light','upload')}${btn('Ajouter','add-transaction','btn-dark','plus')}`;return `${header('Mes opérations','Toutes les transactions, avec recherche, filtres et pointage.',actions,'HISTORIQUE BANCAIRE')}<div class="transactions-toolbar"><div class="search-input">${ico('search')}<input id="search-operations" placeholder="Rechercher un libellé, un montant…" value="${h(search)}" /></div><select id="filter-account" class="filter-select" aria-label="Filtrer par compte"><option value="all">Tous les comptes</option>${db.accounts.map(a=>`<option value="${h(a.id)}" ${accountFilter===a.id?'selected':''}>${h(a.name)}</option>`).join('')}</select><select id="filter-category" class="filter-select" aria-label="Filtrer par catégorie"><option value="all">Toutes les catégories</option>${Object.keys(CATEGORIES).map(c=>`<option ${catFilter===c?'selected':''}>${h(c)}</option>`).join('')}</select></div><section class="card ops-list"><div id="operation-rows">${filterRows()}</div></section><div class="footnote">Les opérations importées ou synchronisées sont identifiées par leur source. Le pointage est indépendant de la synchronisation bancaire.</div>`}
 function filterRows(){return groupedRows([...db.transactions].filter(t=>{const q=search.toLocaleLowerCase('fr').trim();return (accountFilter==='all'||t.accountId===accountFilter)&&(catFilter==='all'||t.category===catFilter||t.splits?.some(s=>s.category===catFilter))&&(!q||[t.merchant,t.notes,t.category,t.amount,accName(t.accountId)].join(' ').toLocaleLowerCase('fr').includes(q))}).sort(dateSort))}
