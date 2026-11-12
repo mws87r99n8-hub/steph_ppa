@@ -127,3 +127,21 @@ def delete(slot: str) -> None:
     ensure_schema()
     with _connect() as conn:
         conn.execute("DELETE FROM cadran_private_state WHERE slot=%s", (slot,))
+
+
+def self_test() -> bool:
+    """Verify private DB connectivity, writes, reads and encryption safely.
+
+    Only a session-local TEMP table is used; no existing personal data or
+    banking consent is read or altered. The table drops at transaction commit.
+    """
+    ensure_schema()
+    plaintext = b'{"cadran_storage_probe":true}'
+    ciphertext = _cipher().encrypt(plaintext)
+    with _connect() as conn:
+        conn.execute(
+            "CREATE TEMP TABLE cadran_storage_probe (payload BYTEA NOT NULL) ON COMMIT DROP"
+        )
+        conn.execute("INSERT INTO cadran_storage_probe (payload) VALUES (%s)", (ciphertext,))
+        row = conn.execute("SELECT payload FROM cadran_storage_probe LIMIT 1").fetchone()
+    return bool(row and _cipher().decrypt(bytes(row[0])) == plaintext)
