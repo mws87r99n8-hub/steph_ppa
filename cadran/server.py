@@ -551,6 +551,8 @@ async def sync(request: Request):
     if storage.configured():
         try:
             await asyncio.to_thread(storage.write, "bank", result)
+            # Also share existing valid browser consent with standalone PWA.
+            await asyncio.to_thread(storage.write, "consent", consent)
         except Exception:
             LOGGER.error("Unable to persist encrypted bank snapshot")
             raise HTTPException(503, "Comptes récupérés, mais sauvegarde sécurisée momentanément indisponible. Réessayez.")
