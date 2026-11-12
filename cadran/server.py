@@ -361,8 +361,14 @@ async def callback(request: Request):
         return response
     response = RedirectResponse(PUBLIC_URL + "/?bank_callback=1", status_code=303)
     ttl = max(60, min(CONSENT_TTL, int(exp - time.time())))
-    cookie(response, CONSENT_COOKIE,
-           {"type": "consent", "session": sid, "valid_until": until, "exp": time.time() + ttl}, ttl)
+    consent_data = {"type": "consent", "session": sid, "valid_until": until,
+                    "exp": time.time() + ttl}
+    if storage.configured():
+        try:
+            await asyncio.to_thread(storage.write, "consent", consent_data)
+        except Exception:
+            LOGGER.error("Unable to persist encrypted consent to private storage")
+    cookie(response, CONSENT_COOKIE, consent_data, ttl)
     response.delete_cookie(STATE_COOKIE, path="/")
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -422,7 +428,7 @@ def normalized_tx(tx: dict, account_id: str) -> dict | None:
 
 @app.post("/api/bank/sync")
 async def sync(request: Request):
-    consent = require_consent(request)
+    consent = await require_consent(request)
     sid = str(consent.get("session") or "")
     try:
         UUID(sid)
@@ -538,19 +544,34 @@ async def sync(request: Request):
                 "Le code XXX au niveau du compte n'est pas bloquant ; vérifiez "
                 "la devise des soldes dans Enable Banking.")
         raise HTTPException(409, "Comptes SG autorisés, mais aucun solde EUR exploitable identifié.")
-    return {"source": "Enable Banking", "accounts": accounts, "transactions": transactions,
-            "lastSync": int(time.time()), "consentValidUntil": consent.get("valid_until"),
-            "periodStart": date_from}
+    result = {"source": "Enable Banking", "accounts": accounts,
+              "transactions": transactions, "lastSync": int(time.time()),
+              "consentValidUntil": consent.get("valid_until"),
+              "periodStart": date_from}
+    if storage.configured():
+        try:
+            await asyncio.to_thread(storage.write, "bank", result)
+        except Exception:
+            LOGGER.error("Unable to persist encrypted bank snapshot")
+            raise HTTPException(503, "Comptes récupérés, mais sauvegarde sécurisée momentanément indisponible. Réessayez.")
+    return result
 
 @app.post("/api/bank/disconnect")
 async def disconnect(request: Request):
-    consent = require_consent(request)
+    consent = await require_consent(request)
     sid = str(consent.get("session") or "")
     try:
         UUID(sid)
     except ValueError:
         raise HTTPException(409, "Session incorrecte.")
     await eb("DELETE", f"/sessions/{sid}")
+    if storage.configured():
+        try:
+            await asyncio.to_thread(storage.delete, "consent")
+            await asyncio.to_thread(storage.delete, "bank")
+        except Exception:
+            LOGGER.error("Consent revoked; private storage cleanup failed")
+            raise HTTPException(503, "Consentement révoqué, mais suppression serveur à vérifier.")
     response = JSONResponse({"disconnected": True})
     response.delete_cookie(CONSENT_COOKIE, path="/")
     return response
