@@ -7,6 +7,7 @@ The owner must configure private Render environment variables manually.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -24,6 +25,7 @@ from uuid import UUID
 
 import httpx
 import jwt
+import storage
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -82,12 +84,22 @@ def require_login(request: Request):
     if not login_cookie(request):
         raise HTTPException(401, "Session expirée. Déverrouillez le module bancaire.")
 
-def require_consent(request: Request):
+async def shared_consent(request: Request) -> dict | None:
+    saved = bank_cookie(request)
+    if saved:
+        return saved
+    if storage.configured():
+        stored, _ = await asyncio.to_thread(storage.read, "consent")
+        if stored and stored.get("exp", 0) > time.time() and stored.get("type") == "consent":
+            return stored
+    return None
+
+async def require_consent(request: Request) -> dict:
     require_login(request)
-    d = bank_cookie(request)
-    if not d:
-        raise HTTPException(409, "Aucun compte bancaire autorisé. Connectez Société Générale.")
-    return d
+    value = await shared_consent(request)
+    if not value:
+        raise HTTPException(409, "Aucun consentement bancaire actif. Connectez Société Générale.")
+    return value
 
 def cookie(response, name, data, ttl):
     response.set_cookie(name, encode_cookie(data), max_age=ttl,
@@ -133,7 +145,7 @@ async def eb(method: str, path: str, *, params=None, body=None) -> dict:
 
 @app.middleware("http")
 async def secure(request: Request, call_next):
-    if request.url.path.startswith("/api/bank/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+    if request.url.path.startswith(("/api/bank/", "/api/data/")) and request.method in ("POST", "PUT", "PATCH", "DELETE"):
         origin = request.headers.get("origin", "")
         if origin and origin != PUBLIC_URL:
             return JSONResponse({"error": "Origine non autorisée."}, status_code=403)
@@ -168,12 +180,12 @@ class PasswordInput(BaseModel):
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "provider": "Enable Banking", "bankConfigured": configured()}
+    return {"ok": True, "provider": "Enable Banking", "bankConfigured": configured(), "storageConfigured": storage.configured()}
 
 @app.get("/api/bank/status")
 async def status(request: Request):
     logged = configured() and login_cookie(request)
-    consent = bank_cookie(request) if logged else None
+    consent = await shared_consent(request) if logged else None
     return {"provider": "Enable Banking", "readOnly": True, "selectedBank": "Société Générale",
             "configured": configured(), "authenticated": bool(logged),
             "connected": bool(consent),
