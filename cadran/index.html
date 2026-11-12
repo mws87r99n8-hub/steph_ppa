@@ -570,6 +570,95 @@ function inferCategory(merchant,amount){
   }
   return 'Autres';
 }
+
+const SUBCATEGORIES={
+  'Alimentation':['Courses alimentaires','Boulangerie','Produits frais','Autres courses','À préciser'],
+  'Logement':['Loyer','Électricité et gaz','Eau','Charges et copropriété','À préciser'],
+  'Transport':['Carburant','Péages','Transport collectif','Stationnement','Taxis et mobilité','Entretien automobile','À préciser'],
+  'Abonnements':['Téléphonie et internet','Streaming et musique','Logiciels et cloud','Autres abonnements','À préciser'],
+  'Loisirs':['Restaurants et livraison','Culture et spectacles','Voyages et hébergement','Sport et loisirs','À préciser'],
+  'Santé':['Pharmacie','Consultations et soins','Optique','Mutuelles','À préciser'],
+  'Achats':['Achats en ligne','Vêtements','Maison et bricolage','Sport et équipement','Autres achats','À préciser'],
+  'Épargne':['Versement épargne','À préciser'],
+  'Revenus':['Salaire','Remboursements','Autres revenus','À préciser'],
+  'Virement':['Virement entre comptes','Autres virements','À préciser'],
+  'Autres':['À préciser']
+};
+// A subcategory requires an explicit clue in the bank merchant label; unknown
+// labels remain "À préciser", never a guessed specific purchase.
+const AUTO_SUBCATEGORY_PATTERNS={
+ 'Alimentation':[
+  ['Boulangerie',/\b(?:BOULANGERIE|PATISSERIE|PAIN QUOTIDIEN|PAUL BOULANGERIE|MARIE BLACHERE)\b/],
+  ['Produits frais',/\b(?:GRAND FRAIS|BIOCOOP|PRIMEUR|BOUCHERIE|POISSONNERIE|MARCHE ALIMENTAIRE)\b/],
+  ['Courses alimentaires',/\b(?:CARREFOUR|AUCHAN|INTERMARCHE|LECLERC|LIDL|ALDI|MONOPRIX|CASINO|SUPER U|HYPER U|FRANPRIX|NETTO|PICARD|SUPERMARCHE|HYPERMARCHE)\b/]
+ ],
+ 'Logement':[
+  ['Loyer',/\b(?:LOYER|BAILLEUR|GESTION LOCATIVE)\b/],
+  ['Électricité et gaz',/\b(?:EDF|ENGIE|TOTALENERGIES|TOTAL ENERGIES|GRDF|ENEDIS|ELECTRICITE|GAZ)\b/],
+  ['Eau',/\b(?:VEOLIA|SUEZ EAU|EAU POTABLE|EAUX DE)\b/],
+  ['Charges et copropriété',/\b(?:SYNDIC|COPROPRIETE|CHARGES LOCATIVES)\b/]
+ ],
+ 'Transport':[
+  ['Carburant',/\b(?:STATION SERVICE|STATION ESSENCE|CARBURANT|ESSENCE|DIESEL|TOTAL ACCESS|SHELL|ESSO|AVIA)\b/],
+  ['Péages',/\b(?:PEAGE|AUTOROUTE|VINCI AUTOROUTES|BIP GO)\b/],
+  ['Stationnement',/\b(?:PARKING|STATIONNEMENT|Q PARK|INDIGO PARK)\b/],
+  ['Transport collectif',/\b(?:SNCF|TGV|OUIGO|TER|RATP|RTM|TCL|METRO|BUS)\b/],
+  ['Taxis et mobilité',/\b(?:UBER|BOLT|TAXI|BLABLACAR)\b/],
+  ['Entretien automobile',/\b(?:GARAGE|CONTROLE TECHNIQUE|NOR AUTO|NORAUTO|FEU VERT|MIDAS|SPEEDY)\b/]
+ ],
+ 'Abonnements':[
+  ['Téléphonie et internet',/\b(?:FREE MOBILE|FREE TELECOM|SFR|BOUYGUES|ORANGE|SOSH|B AND YOU|RED BY SFR|INTERNET FIBRE)\b/],
+  ['Streaming et musique',/\b(?:NETFLIX|SPOTIFY|DEEZER|DISNEY PLUS|PRIME VIDEO|APPLE MUSIC|CANAL PLUS|YOUTUBE PREMIUM)\b/],
+  ['Logiciels et cloud',/\b(?:ICLOUD|GOOGLE ONE|MICROSOFT 365|ADOBE|DROPBOX|OPENAI|CHATGPT)\b/],
+  ['Autres abonnements',/\b(?:ABONNEMENT|COTISATION)\b/]
+ ],
+ 'Loisirs':[
+  ['Restaurants et livraison',/\b(?:RESTAURANT|PIZZERIA|BRASSERIE|UBER EATS|DELIVEROO|JUST EAT|MCDONALD|BURGER KING|KFC|SUBWAY)\b/],
+  ['Culture et spectacles',/\b(?:CINEMA|THEATRE|PATHE|GAUMONT|UGC|CONCERT|SPECTACLE)\b/],
+  ['Voyages et hébergement',/\b(?:HOTEL|AIRBNB|BOOKING|VACANCES|CAMPING)\b/],
+  ['Sport et loisirs',/\b(?:BOWLING|PISCINE|SALLE DE SPORT|FITNESS|CLUB SPORTIF)\b/]
+ ],
+ 'Santé':[
+  ['Pharmacie',/\b(?:PHARMACIE|PARAPHARMACIE)\b/],
+  ['Consultations et soins',/\b(?:MEDECIN|DOCTEUR|DENTISTE|KINE|OSTEOPATHE|LABORATOIRE MEDICAL)\b/],
+  ['Optique',/\b(?:OPTICIEN|OPTIQUE|LUNETTES)\b/],
+  ['Mutuelles',/\b(?:MUTUELLE|COMPLEMENTAIRE SANTE)\b/]
+ ],
+ 'Achats':[
+  ['Achats en ligne',/\b(?:AMAZON|AMZN|TEMU|ALIEXPRESS|CDISCOUNT|MANOMANO)\b/],
+  ['Vêtements',/\b(?:ZALANDO|VINTED|ZARA|H AND M|KIABI|PRIMARK|SHEIN)\b/],
+  ['Maison et bricolage',/\b(?:IKEA|LEROY MERLIN|CASTORAMA|BRICO DEPOT|CONFORAMA|BUT)\b/],
+  ['Sport et équipement',/\b(?:DECATHLON|INTERSPORT)\b/],
+  ['Autres achats',/\b(?:FNAC|DARTY|BOULANGER|ACTION)\b/]
+ ],
+ 'Épargne':[['Versement épargne',/\b(?:LIVRET|EPARGNE|PEL|LDDS|LEP)\b/]],
+ 'Virement':[['Virement entre comptes',/\b(?:LIVRET|EPARGNE|TRANSFERT INTERNE|ENTRE COMPTES)\b/]],
+ 'Revenus':[
+  ['Salaire',/\b(?:SALAIRE|REMUNERATION|PAIE)\b/],
+  ['Remboursements',/\b(?:REMBOURSEMENT|REMBT|INDEMNITE)\b/]
+ ]
+};
+function inferSubcategory(merchant,category,amount){
+  if(!SUBCATEGORIES[category])return 'À préciser';
+  const key=merchantCategoryRuleKey(merchant);
+  const learned=key&&(db.subcategoryRules||{})[key];
+  if(learned&&SUBCATEGORIES[category].includes(learned))return learned;
+  const label=normalizeCategoryLabel(merchant);
+  for(const [subcategory,expression] of AUTO_SUBCATEGORY_PATTERNS[category]||[]){
+    if(expression.test(label))return subcategory;
+  }
+  return category==='Virement'?'Autres virements':category==='Revenus'?'Autres revenus':'À préciser';
+}
+function rememberMerchantSubcategory(merchant,category,subcategory){
+  if(!SUBCATEGORIES[category]?.includes(subcategory))return false;
+  const key=merchantCategoryRuleKey(merchant);
+  if(!key)return false;
+  db.subcategoryRules??={};db.subcategoryRules[key]=subcategory;
+  return true;
+}
+function validSubcategory(category,subcategory){
+  return SUBCATEGORIES[category]?.includes(subcategory)||false;
+}
 function isManualImportedCategory(tx,merchant,amount){
   if(tx.categoryManual===true)return true;
   if(tx.categoryManual===false)return false;
