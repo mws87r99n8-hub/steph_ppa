@@ -207,7 +207,24 @@ def sanitize_manual_state(value: dict) -> dict:
             and t.get("source") != "enablebanking"
             and str(t.get("accountId")) in ids]
     recurring = [r for r in value.get("recurring", []) if isinstance(r, dict)
-                 and str(r.get("accountId", "")) in ids]
+                 and (str(r.get("accountId", "")) in ids or
+                      (str(r.get("accountId", "")).startswith("eb-") and
+                       len(str(r.get("accountId", ""))) == 67))]
+    original_overrides = value.get("bankOverrides") or {}
+    if not isinstance(original_overrides, dict) or len(original_overrides) > 30000:
+        raise HTTPException(413, "Annotations bancaires incorrectes ou trop nombreuses.")
+    bank_overrides = {}
+    for ref, entry in original_overrides.items():
+        if not (isinstance(ref, str) and len(ref) == 64 and
+                all(c in "0123456789abcdef" for c in ref) and isinstance(entry, dict)):
+            continue
+        bank_overrides[ref] = {
+            "category": str(entry.get("category", "Autres"))[:80],
+            "notes": str(entry.get("notes", ""))[:300],
+            "merchant": str(entry.get("merchant", ""))[:160],
+            "reconciled": bool(entry.get("reconciled", False)),
+            "splits": entry.get("splits", [])[:30] if isinstance(entry.get("splits"), list) else [],
+        }
     if len(accounts) > 300 or len(txns) > 30000 or len(recurring) > 10000:
         raise HTTPException(413, "Trop d'enregistrements pour cette sauvegarde.")
     return {
@@ -217,6 +234,7 @@ def sanitize_manual_state(value: dict) -> dict:
         "recurring": recurring,
         "settings": value.get("settings", {"hidden": False}),
         "imported": value.get("imported", []),
+        "bankOverrides": bank_overrides,
     }
 
 
