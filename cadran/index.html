@@ -770,6 +770,12 @@ function importEnableBankingData(payload){
       ?String(override?.category||previous?.category||legacy)
       :inferCategory(rawMerchant,amount);
     const safeCategory=CATEGORIES[category]?category:inferCategory(rawMerchant,amount);
+    const explicitSubcategory=typeof override?.manualSubcategory==='boolean'
+      ?override.manualSubcategory:previous?.subcategoryManual===true;
+    const priorSubcategory=String(override?.subcategory||previous?.subcategory||'');
+    const subcategory=explicitSubcategory&&validSubcategory(safeCategory,priorSubcategory)
+      ?priorSubcategory:inferSubcategory(rawMerchant,safeCategory,amount);
+    const manualSubcategory=explicitSubcategory&&validSubcategory(safeCategory,priorSubcategory);
     const note=String(override?.notes??previous?.notes??'').slice(0,300);
     const reconciled=override?!!override.reconciled:!!previous?.reconciled;
     const oldSplits=override&&Array.isArray(override.splits)?override.splits:previous?.splits||[];
@@ -777,13 +783,15 @@ function importEnableBankingData(payload){
     const splits=Math.abs(splitSum-Math.abs(amount))<0.06?oldSplits:[];
     if(previous){
       Object.assign(previous,{accountId:a.id,date,amount,providerMerchant:rawMerchant,merchant:shownMerchant,
-        category:safeCategory,categoryManual:explicitManual,notes:note,reconciled,splits,
+        category:safeCategory,categoryManual:explicitManual,
+        subcategory,subcategoryManual:manualSubcategory,notes:note,reconciled,splits,
         enableTransactionId:ref,source:'enablebanking'});
       updatedTx++;
     }else{
       db.transactions.push({id:'ebt-'+ref,accountId:a.id,date,amount,providerMerchant:rawMerchant,
         merchant:shownMerchant,category:safeCategory,categoryManual:explicitManual,
-        notes:note,reconciled,splits,source:'enablebanking',enableTransactionId:ref});
+        subcategory,subcategoryManual:manualSubcategory,notes:note,reconciled,splits,
+        source:'enablebanking',enableTransactionId:ref});
       addedTx++;
     }
     if(amount<0){
