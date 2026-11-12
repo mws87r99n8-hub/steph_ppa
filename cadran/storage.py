@@ -47,7 +47,7 @@ def _cipher() -> Fernet:
 def _connect():
     if not configured():
         raise StorageError("Stockage sécurisé non configuré.")
-    return psycopg.connect(DATABASE_URL, connect_timeout=10, autocommit=False)
+    return psycopg.connect(DATABASE_URL, connect_timeout=10, sslmode="require", autocommit=False)
 
 
 @lru_cache(maxsize=1)
