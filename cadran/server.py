@@ -515,9 +515,13 @@ def normalized_tx(tx: dict, account_id: str) -> dict | None:
         account_id, ref, booked, str(amount), merchant,
         str(tx.get("balance_after_transaction") or "")
     ], sort_keys=True, ensure_ascii=False)
+    merchant_code = str(tx.get("merchant_category_code") or "").strip()
+    if len(merchant_code) != 4 or not merchant_code.isascii() or not merchant_code.isdigit():
+        merchant_code = ""
     return {"id": global_id(fingerprint), "account_id": account_id, "amount": amount,
             "date": booked[:10], "clean_description": merchant[:160],
             "provider_description": merchant[:160], "future": False, "deleted": False,
+            "merchant_category_code": merchant_code,
             "currency_code": "EUR"}
 
 def classify_bank_account(detail: dict) -> str:
