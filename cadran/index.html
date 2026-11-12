@@ -190,13 +190,18 @@ function manualSnapshot(){
   const overrides={...(db.bankOverrides||{})};
   for(const t of db.transactions){
     if(t.source==='enablebanking'&&/^[0-9a-f]{64}$/.test(String(t.enableTransactionId||''))){
-      overrides[t.enableTransactionId]={category:String(t.category||'Autres'),notes:String(t.notes||''),merchant:String(t.merchant||''),reconciled:!!t.reconciled,splits:Array.isArray(t.splits)?t.splits:[]};
+      overrides[t.enableTransactionId]={category:String(t.category||'Autres'),
+        manualCategory:typeof t.categoryManual==='boolean'?t.categoryManual:null,
+        notes:String(t.notes||''),merchant:String(t.merchant||''),
+        reconciled:!!t.reconciled,splits:Array.isArray(t.splits)?t.splits:[]};
     }
   }
-  return {...db,bankOverrides:overrides,accounts:db.accounts.filter(a=>!ids.has(a.id)),transactions:db.transactions.filter(t=>t.source!=='enablebanking'),recurring:db.recurring};
+  return {...db,bankOverrides:overrides,categoryRules:db.categoryRules||{},
+    accounts:db.accounts.filter(a=>!ids.has(a.id)),
+    transactions:db.transactions.filter(t=>t.source!=='enablebanking'),recurring:db.recurring};
 }
-function hasUserManualData(x){return !!(x&&!x.demo&&((x.accounts||[]).length||(x.transactions||[]).length||(x.recurring||[]).length||Object.keys(x.budgets||{}).length||Object.keys(x.bankOverrides||{}).length||Object.keys(x.bankAliases||{}).length))}
-function emptyManual(){return {version:1,demo:false,accounts:[],transactions:[],budgets:{},recurring:[],settings:{hidden:false},imported:[],bankOverrides:{},bankAliases:{}}}
+function hasUserManualData(x){return !!(x&&!x.demo&&((x.accounts||[]).length||(x.transactions||[]).length||(x.recurring||[]).length||Object.keys(x.budgets||{}).length||Object.keys(x.bankOverrides||{}).length||Object.keys(x.bankAliases||{}).length||Object.keys(x.categoryRules||{}).length))}
+function emptyManual(){return {version:1,demo:false,accounts:[],transactions:[],budgets:{},recurring:[],settings:{hidden:false},imported:[],bankOverrides:{},bankAliases:{},categoryRules:{}}}
 function cloudIndicator(label,error=false){const node=byId('cloud-status');if(node){node.textContent=label;node.title=label;node.style.color=error?'#bd4c58':'#62826d'}}
 function persist(){
   const safe=manualSnapshot();
