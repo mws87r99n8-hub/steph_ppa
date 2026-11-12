@@ -274,6 +274,23 @@ function categoryTotalsForAnalysis(rows){
   }
   return [...amounts.entries()].map(([name,amount])=>({name,amount:round(amount)})).sort((a,b)=>b.amount-a.amount);
 }
+function subcategoryTotalsForAnalysis(rows){
+  const totals=new Map();
+  for(const tx of rows){
+    const amount=Math.abs(num(tx.amount));
+    const splits=Array.isArray(tx.splits)?tx.splits.filter(x=>num(x.amount)>0):[];
+    const validSplits=splits.length&&Math.abs(splits.reduce((sum,x)=>sum+num(x.amount),0)-amount)<0.06;
+    const groups=validSplits?splits.map(x=>({category:String(x.category||'Autres'),subcategory:String(x.subcategory||'À préciser'),amount:num(x.amount)}))
+      :[{category:String(tx.category||'Autres'),subcategory:String(tx.subcategory||'À préciser'),amount}];
+    for(const item of groups){
+      const sub=validSubcategory(item.category,item.subcategory)?item.subcategory:'À préciser';
+      const key=JSON.stringify([item.category,sub]);
+      totals.set(key,(totals.get(key)||0)+item.amount);
+    }
+  }
+  return [...totals].map(([key,value])=>{const [category,name]=JSON.parse(key);return {category,name,amount:round(value)};})
+    .sort((a,b)=>b.amount-a.amount||a.name.localeCompare(b.name,'fr'));
+}
 function accountTotalsForAnalysis(rows){
   const data=new Map();
   for(const t of rows){
@@ -364,6 +381,7 @@ function renderAnalytics(){
   const isCurrentPeriod=month===currentMonth();const cutoff=isCurrentPeriod?Number(isoDay().slice(8,10)):null;const previousRows=expenseRowsForAnalysis(monthMove(month,-1),analysisAccount).filter(t=>cutoff===null||Number(String(t.date).slice(8,10))<=cutoff);const previous=expenseTotalForAnalysis(previousRows);
   const delta=previous>0?((total-previous)/previous*100):null;
   const accounts=accountTotalsForAnalysis(rows),categories=categoryTotalsForAnalysis(rows);
+  const subcategories=subcategoryTotalsForAnalysis(rows),maxSubcategory=Math.max(1,...subcategories.map(x=>x.amount));
   const periods=Array.from({length:6},(_,i)=>monthMove(month,i-5));
   const trend=periods.map(p=>({period:p,amount:expenseTotalForAnalysis(expenseRowsForAnalysis(p,analysisAccount))}));
   const maxTrend=Math.max(1,...trend.map(x=>x.amount)),maxAccount=Math.max(1,...accounts.map(x=>x.amount)),maxCategory=Math.max(1,...categories.map(x=>x.amount));
@@ -375,6 +393,7 @@ function renderAnalytics(){
   const empty='<div class="analysis-empty">Aucune dépense comptabilisée sur cette période pour ce compte.</div>';
   const accountBars=accounts.length?accounts.map(a=>`<button class="analysis-row analysis-account-row" type="button" data-action="analysis-choose-account" data-account="${h(a.id)}"><span class="analysis-row-label"><strong>${h(a.name)}</strong><small>${a.count} opération(s) · ${total?Math.round(a.amount/total*100):0} % du total</small></span><span class="analysis-track"><span style="width:${Math.max(1,a.amount/maxAccount*100).toFixed(1)}%"></span></span><b>${money(a.amount)}</b></button>`).join(''):empty;
   const categoryBars=categories.length?categories.map(a=>`<div class="analysis-row"><span class="analysis-row-label"><strong>${h(a.name)}</strong><small>${total?Math.round(a.amount/total*100):0} % du total</small></span><span class="analysis-track"><span style="width:${Math.max(1,a.amount/maxCategory*100).toFixed(1)}%"></span></span><b>${money(a.amount)}</b></div>`).join(''):empty;
+  const subcategoryBars=subcategories.length?subcategories.slice(0,15).map(a=>`<div class="analysis-row"><span class="analysis-row-label"><strong>${h(a.name)}</strong><small>${h(a.category)} · ${total?Math.round(a.amount/total*100):0} % du total</small></span><span class="analysis-track"><span style="width:${Math.max(1,a.amount/maxSubcategory*100).toFixed(1)}%"></span></span><b>${money(a.amount)}</b></div>`).join(''):empty;
   const trendBars=trend.map(x=>`<div class="analysis-trend-item"><span class="analysis-trend-value">${x.amount?money(x.amount):'—'}</span><div class="analysis-trend-track"><div class="analysis-trend-bar" style="height:${x.amount?Math.max(3,x.amount/maxTrend*100).toFixed(1):0}%"></div></div><span class="analysis-trend-period">${h(fmtMonth.format(fromDay(x.period+'-01')).slice(0,3))} ${x.period.slice(2,4)}</span></div>`).join('');
   const suggestedMarkup=suggestions.length?suggestions.slice(0,12).map((a,i)=>`<div class="analysis-repeat"><div class="analysis-repeat-top"><div><strong>${h(a.merchant)}</strong><small>${h(accName(a.accountId))} · ${a.occurrences} paiements</small></div><b>${money(a.amount)}</b></div><div class="analysis-repeat-bottom"><span class="analysis-frequency">${h(ANALYSIS_PERIODS[a.cadence].label)}</span><span>${a.variable?'Montant variable':'Montant régulier'}</span><span>Prochaine date estimée : ${a.nextDate?h(formatDate(a.nextDate)):'indisponible'}</span>${a.programmed?'<span class="analysis-programmed">Déjà programmée</span>':`<button type="button" class="btn btn-light btn-sm" data-action="analysis-program" data-index="${i}">Programmer</button>`}</div></div>`).join(''):'<div class="analysis-empty">Aucune récurrence suffisamment régulière détectée. La détection nécessite au moins 3 paiements comparables sur un même compte.</div>';
   const scheduledMarkup=known.length?known.slice(0,10).map(r=>`<div class="analysis-scheduled"><div><strong>${h(r.merchant)}</strong><small>${h(accName(r.accountId))} · ${h(FREQ[r.frequency]||r.frequency)}</small></div><b>${money(Math.abs(num(r.amount)))}</b></div>`).join(''):'<div class="analysis-empty">Aucune dépense récurrente programmée.</div>';
@@ -389,6 +408,7 @@ function renderAnalytics(){
       <section class="card card-pad"><div class="section-header"><h2>Dépenses par compte</h2></div><div class="analysis-rows">${accountBars}</div></section>
       <section class="card card-pad"><div class="section-header"><h2>Répartition par catégorie</h2></div><div class="analysis-rows">${categoryBars}</div></section>
     </div>
+    <section class="card card-pad" style="margin-bottom:18px"><div class="section-header"><h2>Détail par sous-catégorie</h2><span class="mini-tag">${subcategories.length} sous-catégorie(s)</span></div><div class="analysis-rows">${subcategoryBars}</div><p class="footnote">Classement automatique à partir du libellé bancaire, avec conservation des corrections manuelles. « À préciser » signifie que le libellé ne permet pas une identification fiable.</p></section>
     <section class="card card-pad"><div class="section-header"><h2>Évolution des dépenses · 6 mois</h2></div><div class="analysis-trend" role="img" aria-label="Dépenses mensuelles en euros pour les six derniers mois">${trendBars}</div><p class="footnote">Montants dépensés hors virements internes. Les mois sans historique chargé ne représentent pas nécessairement zéro dépense réelle.</p></section>
     <div class="analysis-grid">
       <section class="card card-pad"><div class="section-header"><h2>Récurrences détectées</h2><span class="mini-tag">${suggestions.length} suggestion(s)</span></div><div class="analysis-repeat-list">${suggestedMarkup}</div><p class="footnote">Détection indicative à partir d’au moins 3 paiements passés à intervalle régulier, chez un même bénéficiaire et sur le même compte. Les montants et dates à venir sont des estimations, jamais des prélèvements confirmés.</p></section>
