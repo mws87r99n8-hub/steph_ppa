@@ -241,11 +241,27 @@ def sanitize_manual_state(value: dict) -> dict:
             continue
         bank_overrides[ref] = {
             "category": str(entry.get("category", "Autres"))[:80],
+            "manualCategory": (bool(entry["manualCategory"])
+                               if isinstance(entry.get("manualCategory"), bool) else None),
             "notes": str(entry.get("notes", ""))[:300],
             "merchant": str(entry.get("merchant", ""))[:160],
             "reconciled": bool(entry.get("reconciled", False)),
             "splits": entry.get("splits", [])[:30] if isinstance(entry.get("splits"), list) else [],
         }
+    original_rules = value.get("categoryRules") or {}
+    if not isinstance(original_rules, dict) or len(original_rules) > 2000:
+        raise HTTPException(413, "Trop de règles de classement des dépenses.")
+    expense_categories = {
+        "Alimentation", "Logement", "Transport", "Abonnements",
+        "Loisirs", "Santé", "Achats", "Épargne", "Autres", "Virement"
+    }
+    category_rules = {}
+    for merchant, category in original_rules.items():
+        if (isinstance(merchant, str) and 4 <= len(merchant) <= 96
+                and merchant == merchant.upper()
+                and all(ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " for ch in merchant)
+                and isinstance(category, str) and category in expense_categories):
+            category_rules[merchant] = category
     original_aliases = value.get("bankAliases") or {}
     if not isinstance(original_aliases, dict) or len(original_aliases) > 300:
         raise HTTPException(413, "Trop de noms de comptes bancaires.")
@@ -268,6 +284,7 @@ def sanitize_manual_state(value: dict) -> dict:
         "imported": value.get("imported", []),
         "bankOverrides": bank_overrides,
         "bankAliases": bank_aliases,
+        "categoryRules": category_rules,
     }
 
 
