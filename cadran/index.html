@@ -594,9 +594,89 @@ function recategorizeImportedExpenses(){
   return {changed,uncertain};
 }
 
-function importEnableBankingData(payload){if(!Array.isArray(payload.accounts)||!Array.isArray(payload.transactions))throw Error('Réponse bancaire non reconnue');if(payload.coverage&&typeof payload.coverage==='object')bankCoverage=payload.coverage;let addedAccounts=0,addedTx=0,updatedTx=0,deletedTx=0;const ts=isoDay();for(const r of payload.accounts){if(r.currency_code!=='EUR'&&!(r.balance_available===false&&String(r.type||'').toLowerCase()==='savings'&&['XXX',''].includes(String(r.currency_code||''))))continue;const remote=String(r.id);let a=db.accounts.find(a=>a.enableAccountId===remote);const providerName=String(r.name||'Compte bancaire').slice(0,100);const alias=String((db.bankAliases||{})[remote]||'').trim();const bankTypes={SVGS:'savings',CACC:'checking',CASH:'checking',CARD:'card',LOAN:'loan'};const type=bankTypes[String(r.type||'').toUpperCase()]||String(r.type||'checking');const balanceAvailable=r.balance_available!==false&&r.balance!==null&&r.balance!==undefined&&Number.isFinite(Number(r.balance));const value={name:alias||providerName,providerName,type,bank:'Société Générale',balance:balanceAvailable?round(num(r.balance)):null,balanceAvailable,currency:balanceAvailable?'EUR':String(r.currency_code||'XXX'),manual:false,enableAccountId:remote,updatedAt:r.updated_at||ts};const stableId='eb-'+remote;if(a){if(a.id!==stableId){const prior=a.id;for(const t of db.transactions)if(t.accountId===prior)t.accountId=stableId;for(const e of db.recurring)if(e.accountId===prior)e.accountId=stableId;a.id=stableId}Object.assign(a,value)}else {a={id:stableId,color:'#b1daca',...value};db.accounts.push(a);addedAccounts++}}
-for(const r of payload.transactions){const a=db.accounts.find(a=>a.enableAccountId===String(r.account_id));if(!a||r.future)continue;const ref=String(r.id);if(r.deleted){const before=db.transactions.length;db.transactions=db.transactions.filter(t=>t.enableTransactionId!==ref);deletedTx+=before-db.transactions.length;continue}const merchant=String(r.clean_description||r.provider_description||'Opération bancaire').slice(0,160),value=round(num(r.amount)),date=String(r.date||'').slice(0,10);if(!/^\d{4}-\d{2}-\d{2}$/.test(date))continue;let t=db.transactions.find(t=>t.enableTransactionId===ref);if(t){if(t.amount!==value)t.splits=[];Object.assign(t,{accountId:a.id,date,amount:value,enableTransactionId:ref,source:'enablebanking'});updatedTx++}else{db.transactions.push({id:'ebt-'+ref,accountId:a.id,date,amount:value,merchant,category:inferCategory(merchant,value),notes:'',source:'enablebanking',enableTransactionId:ref,reconciled:false,splits:[]});addedTx++}const override=(db.bankOverrides||{})[ref];if(override){const item=db.transactions.find(t=>t.enableTransactionId===ref);if(item)Object.assign(item,{category:String(override.category||item.category),notes:String(override.notes||''),merchant:String(override.merchant||item.merchant),reconciled:!!override.reconciled,splits:Array.isArray(override.splits)?override.splits:[]})}}
-if(payload.accounts.length){db.demo=false}persist();return {addedAccounts,addedTx,updatedTx,deletedTx}}
+function importEnableBankingData(payload){
+  if(!Array.isArray(payload.accounts)||!Array.isArray(payload.transactions))
+    throw Error('Réponse bancaire non reconnue');
+  if(payload.coverage&&typeof payload.coverage==='object')bankCoverage=payload.coverage;
+  let addedAccounts=0,addedTx=0,updatedTx=0,deletedTx=0,classified=0,unclassified=0;
+  const ts=isoDay();
+  for(const r of payload.accounts){
+    if(r.currency_code!=='EUR'&&!(r.balance_available===false&&String(r.type||'').toLowerCase()==='savings'&&['XXX',''].includes(String(r.currency_code||''))))continue;
+    const remote=String(r.id);
+    let a=db.accounts.find(a=>a.enableAccountId===remote);
+    const providerName=String(r.name||'Compte bancaire').slice(0,100);
+    const alias=String((db.bankAliases||{})[remote]||'').trim();
+    const bankTypes={SVGS:'savings',CACC:'checking',CASH:'checking',CARD:'card',LOAN:'loan'};
+    const type=bankTypes[String(r.type||'').toUpperCase()]||String(r.type||'checking');
+    const balanceAvailable=r.balance_available!==false&&r.balance!==null&&r.balance!==undefined&&Number.isFinite(Number(r.balance));
+    const value={name:alias||providerName,providerName,type,bank:'Société Générale',
+      balance:balanceAvailable?round(num(r.balance)):null,balanceAvailable,
+      currency:balanceAvailable?'EUR':String(r.currency_code||'XXX'),
+      manual:false,enableAccountId:remote,updatedAt:r.updated_at||ts};
+    const stableId='eb-'+remote;
+    if(a){
+      if(a.id!==stableId){
+        const prior=a.id;
+        for(const t of db.transactions)if(t.accountId===prior)t.accountId=stableId;
+        for(const e of db.recurring)if(e.accountId===prior)e.accountId=stableId;
+        a.id=stableId;
+      }
+      Object.assign(a,value);
+    }else{
+      db.accounts.push({id:stableId,color:'#b1daca',...value});addedAccounts++;
+    }
+  }
+  for(const r of payload.transactions){
+    const a=db.accounts.find(a=>a.enableAccountId===String(r.account_id));
+    if(!a||r.future)continue;
+    const ref=String(r.id);
+    if(r.deleted){
+      const before=db.transactions.length;
+      db.transactions=db.transactions.filter(t=>t.enableTransactionId!==ref);
+      deletedTx+=before-db.transactions.length;continue;
+    }
+    const rawMerchant=String(r.clean_description||r.provider_description||'Opération bancaire').slice(0,160);
+    const amount=round(num(r.amount)),date=String(r.date||'').slice(0,10);
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(date))continue;
+    const override=(db.bankOverrides||{})[ref];
+    const previous=db.transactions.find(t=>t.enableTransactionId===ref);
+    const legacy=legacyInferCategory(rawMerchant,amount);
+    const explicitManual=override
+      ?(typeof override.manualCategory==='boolean'?override.manualCategory:
+        !!(override.category&&override.category!==legacy))
+      :previous?isManualImportedCategory(previous,rawMerchant,amount):false;
+    const shownMerchant=String(override?.merchant||previous?.merchant||rawMerchant).slice(0,160);
+    const category=explicitManual
+      ?String(override?.category||previous?.category||legacy)
+      :inferCategory(rawMerchant,amount);
+    const safeCategory=CATEGORIES[category]?category:inferCategory(rawMerchant,amount);
+    const note=String(override?.notes??previous?.notes??'').slice(0,300);
+    const reconciled=override?!!override.reconciled:!!previous?.reconciled;
+    const oldSplits=override&&Array.isArray(override.splits)?override.splits:previous?.splits||[];
+    const splitSum=oldSplits.reduce((sum,x)=>sum+num(x.amount),0);
+    const splits=Math.abs(splitSum-Math.abs(amount))<0.06?oldSplits:[];
+    if(previous){
+      Object.assign(previous,{accountId:a.id,date,amount,providerMerchant:rawMerchant,merchant:shownMerchant,
+        category:safeCategory,categoryManual:explicitManual,notes:note,reconciled,splits,
+        enableTransactionId:ref,source:'enablebanking'});
+      updatedTx++;
+    }else{
+      db.transactions.push({id:'ebt-'+ref,accountId:a.id,date,amount,providerMerchant:rawMerchant,
+        merchant:shownMerchant,category:safeCategory,categoryManual:explicitManual,
+        notes:note,reconciled,splits,source:'enablebanking',enableTransactionId:ref});
+      addedTx++;
+    }
+    if(amount<0){
+      if(safeCategory==='Autres')unclassified++;
+      else if(!explicitManual)classified++;
+    }
+  }
+  if(payload.accounts.length)db.demo=false;
+  const recat=recategorizeImportedExpenses();
+  persist();
+  return {addedAccounts,addedTx,updatedTx,deletedTx,
+    classified,unclassified,recategorized:recat.changed};
+}
 async function syncBank(){try{toast('Synchronisation Enable Banking en cours…');const data=await api('/api/bank/sync',{method:'POST',body:'{}'});if(db.demo&&data.accounts?.length){if(!confirm('La synchronisation va remplacer les comptes, budgets et opérations fictifs de démonstration. Continuer ?'))return;db={version:1,demo:false,accounts:[],transactions:[],budgets:{},recurring:[],settings:{hidden:false},imported:[]}}const result=importEnableBankingData(data);closeModal();navigate('accounts');toast(`${result.addedAccounts} compte(s) · ${result.addedTx} nouvelle(s) opération(s) · ${result.updatedTx} mise(s) à jour.`)}catch(err){const message=String(err?.message||err||'Erreur inconnue');if(/load failed|failed to fetch|networkerror|network request failed/i.test(message)){toast('Connexion interrompue par le navigateur. Le serveur peut avoir terminé la synchronisation : vérifie la page Comptes et réessaie sans révoquer le consentement. Sur iPhone, utilise Safari.',true)}else{toast('Synchronisation impossible : '+message,true)}}}
 async function refreshAuthorizedBankAccounts(){if(db.demo)return;try{const data=await api('/api/bank/sync',{method:'POST',body:'{}'});const result=importEnableBankingData(data);render();if(result.addedAccounts||result.addedTx)toast('Comptes bancaires actualisés · '+result.addedAccounts+' compte(s) et '+result.addedTx+' opération(s) récupéré(s).')}catch(err){console.warn('Cadran: actualisation bancaire automatique indisponible');if(view==='accounts')toast('Actualisation bancaire indisponible. Ouvre Connexion bancaire pour réessayer.',true)}}
 async function disconnectBank(){if(!confirm('Révoquer le consentement bancaire Société Générale et supprimer leurs données synchronisées de cet appareil ? Cette action est irréversible.'))return;try{await api('/api/bank/disconnect',{method:'POST',body:'{}'});const bankIds=new Set(db.accounts.filter(a=>a.manual===false).map(a=>a.id));db.transactions=db.transactions.filter(t=>!bankIds.has(t.accountId));db.accounts=db.accounts.filter(a=>a.manual!==false);db.recurring=db.recurring.filter(r=>!bankIds.has(r.accountId));persist();closeModal();navigate('accounts');toast('Accès Enable Banking révoqué et données bancaires locales supprimées.')}catch(err){toast('Révocation impossible : '+err.message,true)}}
