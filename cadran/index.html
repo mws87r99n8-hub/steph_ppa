@@ -505,7 +505,90 @@ function bankModal(){
 }
 async function loginBank(form){const pw=String(new FormData(form).get('password')||'');if(!pw)return;const button=form.querySelector('button[type=submit]');button.disabled=true;try{await api('/api/bank/login',{method:'POST',body:JSON.stringify({password:pw})});await readBankStatus();if(cloud.enabled){const state=await api('/api/data/status');if(state.storageConfigured)await hydrateServerData()}if(bankState.connected){closeModal();if(cloud.ready||!cloud.enabled)await syncBank()}else{bankModal();toast('Cadran déverrouillé. Données serveur chargées si disponibles.')}}catch(err){toast('Ouverture Cadran impossible : '+err.message,true);button.disabled=false}}
 async function connectBank(){try{toast('Préparation du parcours sécurisé Société Générale…');const {url}=await api('/api/bank/connect',{method:'POST',body:'{}'});const dest=new URL(url);if(dest.protocol!=='https:'||!(dest.hostname==='enablebanking.com'||dest.hostname.endsWith('.enablebanking.com')))throw Error('URL de consentement non autorisée');window.location.assign(dest.href)}catch(err){toast('Connexion Société Générale : '+err.message,true)}}
-function inferCategory(merchant,amount){if(amount>0)return 'Revenus';const s=merchant.toUpperCase();if(/CARREFOUR|AUCHAN|INTERMARCHE|LECLERC|LIDL|ALDI|SUPER U|MONOPRIX|PICARD|CASINO/.test(s))return 'Alimentation';if(/SNCF|SHELL|TOTAL|ESSO|BP |AUTOROUTE|UBER|BOLT|TAXI|METRO|PARKING/.test(s))return 'Transport';if(/NETFLIX|SPOTIFY|DISNEY|APPLE\.COM|FREE MOBILE|SFR|BOUYGUES|ORANGE/.test(s))return 'Abonnements';if(/EDF|ENGIE|LOYER|GAZ|EAU|SYNDIC/.test(s))return 'Logement';if(/PHARMAC|DOCTEUR|DENT|SANTE|MUTUELLE/.test(s))return 'Santé';if(/RESTAURANT|CAFE|CINEMA|BOWLING|HOTEL/.test(s))return 'Loisirs';return 'Autres'}
+// Categories are conservative, explainable rules on local transaction labels.
+// Never send merchant names to an external AI service.
+function normalizeCategoryLabel(text){
+  return String(text||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .toUpperCase().replace(/[^A-Z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+}
+function merchantCategoryRuleKey(text){
+  const stop=/^(?:CB|CARTE|PAIEMENT|PRELEVEMENT|PRELEV|PRLV|SEPA|VIR|VIREMENT|REF|REFERENCE|FACTURE|TRANSACTION|OPERATION|BANCAIRE|DE|DU|DES|LE|LES|LA|A|AU|PAR|POUR|CHEZ|SUR|FR|FRANCE|WWW|COM|EUR|NUMERO|ACHAT|INTERNET|POS|DATE|SCT|ID)$/;
+  const all=normalizeCategoryLabel(text).split(' ')
+    .filter(x=>x&&!/^\d+$/.test(x)&&x.length>=2&&!stop.test(x));
+  const key=all.slice(0,6).join(' ').slice(0,96);
+  if(key.length<4||/^(?:RETRAIT|DAB|VIREMENT|PAIEMENT|CARTE|COMPTE|AUTRES|INCONNU|RELEVE)$/.test(key))return '';
+  return key;
+}
+// Used only to distinguish old automatic labels from historical manual edits.
+// Previously Cadran persisted both in the same bankOverrides object.
+function legacyInferCategory(merchant,amount){
+  if(amount>0)return 'Revenus';
+  const value=String(merchant||'').toUpperCase();
+  if(/CARREFOUR|AUCHAN|INTERMARCHE|LECLERC|LIDL|ALDI|SUPER U|MONOPRIX|PICARD|CASINO/.test(value))return 'Alimentation';
+  if(/SNCF|SHELL|TOTAL|ESSO|BP |AUTOROUTE|UBER|BOLT|TAXI|METRO|PARKING/.test(value))return 'Transport';
+  if(/NETFLIX|SPOTIFY|DISNEY|APPLE\.COM|FREE MOBILE|SFR|BOUYGUES|ORANGE/.test(value))return 'Abonnements';
+  if(/EDF|ENGIE|LOYER|GAZ|EAU|SYNDIC/.test(value))return 'Logement';
+  if(/PHARMAC|DOCTEUR|DENT|SANTE|MUTUELLE/.test(value))return 'Santé';
+  if(/RESTAURANT|CAFE|CINEMA|BOWLING|HOTEL/.test(value))return 'Loisirs';
+  return 'Autres';
+}
+// First match wins. Specific sub-brands must precede broad retailers.
+const AUTO_CATEGORY_PATTERNS=[
+ ['Virement', [/\b(?:VIREMENT|VIR|TRANSFERT|VERSEMENT)\b.{0,45}\b(?:LIVRET|LDDS|LDD|PEL|EPARGNE)\b/,
+                 /\b(?:LIVRET|LDDS|LDD|PEL|EPARGNE)\b.{0,35}\b(?:VIREMENT|VIR|TRANSFERT)\b/]],
+ ['Loisirs', [/\b(?:UBER EATS|DELIVEROO|JUST EAT|RESTAURANT|PIZZERIA|BRASSERIE|BOULANGERIE PATISSERIE|MCDONALD|MC DONALD|BURGER KING|KFC|SUBWAY)\b/,
+              /\b(?:CINEMA|PATHE|UGC|GAUMONT|THEATRE|BOWLING|HOTEL|AIRBNB|BOOKING|DISNEYLAND|PARC ASTERIX)\b/]],
+ ['Logement', [/\b(?:EDF|ENGIE|TOTALENERGIES|TOTAL ENERGIES|ENI ENERGIE|ELECTRICITE|LOYER|COPROPRIETE|SYNDIC|VEOLIA EAU|SUEZ EAU|EAU POTABLE)\b/,
+                /\b(?:GAZ DE FRANCE|GRDF|ENEDIS)\b/]],
+ ['Transport', [/\b(?:STATION SERVICE|STATION ESSENCE|CARBURANT|AUTOROUTE|PEAGE|VINCI AUTOROUTES|BIP GO|BIP AND GO)\b/,
+                 /\b(?:TOTAL ACCESS|TOTAL WASH|SHELL|ESSO|AVIA|SNCF|SNCF CONNECT|OUIGO|TGV INOUI|RATP|RTM|TCL|TER|BLABLACAR|UBER|BOLT|TAXI|PARKING|INDIGO PARK|Q PARK|TANDEM)\b/]],
+ ['Santé', [/\b(?:PHARMACIE|PARAPHARMACIE|MEDECIN|DOCTEUR|DENTISTE|ORTHODONT|OPTIQUE|OPTICIEN|LABORATOIRE MEDICAL|ANALYSES MEDICALES|KINE|OSTEOPATHE|MUTUELLE|HARMONIE MUTUELLE)\b/]],
+ ['Abonnements', [/\b(?:NETFLIX|SPOTIFY|DEEZER|DISNEY PLUS|DISNEYPLUS|PRIME VIDEO|AMAZON PRIME|APPLE MUSIC|ICLOUD|CANAL PLUS|CANALPLUS|YOUTUBE PREMIUM|GOOGLE ONE|MICROSOFT 365|XBOX GAME PASS)\b/,
+                   /\b(?:FREE MOBILE|FREE TELECOM|SFR|BOUYGUES TELECOM|BOUYGUES TEL|ORANGE|RED BY SFR|SOSHS?|B AND YOU|B AND Y)\b/]],
+ ['Alimentation', [/\b(?:CARREFOUR|AUCHAN|INTERMARCHE|LECLERC|E LECLERC|LIDL|ALDI|MONOPRIX|PICARD|CASINO|GRAND FRAIS|BIOCOOP|SUPERMARCHE|HYPERMARCHE|SUPER U|HYPER U|SYSTEME U|FRANPRIX|LEADER PRICE|NETTO|PROXI)\b/]],
+ ['Achats', [/\b(?:AMAZON|AMZN|TEMU|ALIEXPRESS|VINTED|ZALANDO|CDISCOUNT|FNAC|DARTY|BOULANGER|LEROY MERLIN|CASTORAMA|BRICO DEPOT|IKEA|DECATHLON|INTERSPORT|ACTION|H AND M|ZARA|KIABI|PRIMARK|LA REDOUTE|SHEIN|MANOMANO|BUT|CONFORAMA)\b/]]
+];
+function inferCategory(merchant,amount){
+  if(num(amount)>0)return 'Revenus';
+  const key=merchantCategoryRuleKey(merchant);
+  const learned=key&&(db.categoryRules||{})[key];
+  if(learned&&CATEGORIES[learned]&&learned!=='Revenus')return learned;
+  const label=normalizeCategoryLabel(merchant);
+  for(const [category,expressions] of AUTO_CATEGORY_PATTERNS){
+    if(expressions.some(expr=>expr.test(label)))return category;
+  }
+  return 'Autres';
+}
+function isManualImportedCategory(tx,merchant,amount){
+  if(tx.categoryManual===true)return true;
+  if(tx.categoryManual===false)return false;
+  return !!(tx.category&&tx.category!==legacyInferCategory(merchant,amount));
+}
+function rememberMerchantCategory(merchant,category){
+  if(!CATEGORIES[category]||category==='Revenus')return false;
+  const key=merchantCategoryRuleKey(merchant);
+  if(!key)return false;
+  db.categoryRules??={};
+  db.categoryRules[key]=category;
+  return true;
+}
+function recategorizeImportedExpenses(){
+  let changed=0,uncertain=0;
+  for(const tx of db.transactions){
+    if(!tx||!['enablebanking','csv','qif','ofx'].includes(tx.source)||num(tx.amount)>=0)continue;
+    const provider=tx.providerMerchant||tx.merchant;
+    if(isManualImportedCategory(tx,provider,tx.amount)||Array.isArray(tx.splits)&&tx.splits.length){
+      tx.categoryManual=true;
+      continue;
+    }
+    const predicted=inferCategory(provider,tx.amount);
+    if(tx.category!==predicted){tx.category=predicted;changed++}
+    tx.categoryManual=false;
+    if(predicted==='Autres')uncertain++;
+  }
+  return {changed,uncertain};
+}
+
 function importEnableBankingData(payload){if(!Array.isArray(payload.accounts)||!Array.isArray(payload.transactions))throw Error('Réponse bancaire non reconnue');if(payload.coverage&&typeof payload.coverage==='object')bankCoverage=payload.coverage;let addedAccounts=0,addedTx=0,updatedTx=0,deletedTx=0;const ts=isoDay();for(const r of payload.accounts){if(r.currency_code!=='EUR'&&!(r.balance_available===false&&String(r.type||'').toLowerCase()==='savings'&&['XXX',''].includes(String(r.currency_code||''))))continue;const remote=String(r.id);let a=db.accounts.find(a=>a.enableAccountId===remote);const providerName=String(r.name||'Compte bancaire').slice(0,100);const alias=String((db.bankAliases||{})[remote]||'').trim();const bankTypes={SVGS:'savings',CACC:'checking',CASH:'checking',CARD:'card',LOAN:'loan'};const type=bankTypes[String(r.type||'').toUpperCase()]||String(r.type||'checking');const balanceAvailable=r.balance_available!==false&&r.balance!==null&&r.balance!==undefined&&Number.isFinite(Number(r.balance));const value={name:alias||providerName,providerName,type,bank:'Société Générale',balance:balanceAvailable?round(num(r.balance)):null,balanceAvailable,currency:balanceAvailable?'EUR':String(r.currency_code||'XXX'),manual:false,enableAccountId:remote,updatedAt:r.updated_at||ts};const stableId='eb-'+remote;if(a){if(a.id!==stableId){const prior=a.id;for(const t of db.transactions)if(t.accountId===prior)t.accountId=stableId;for(const e of db.recurring)if(e.accountId===prior)e.accountId=stableId;a.id=stableId}Object.assign(a,value)}else {a={id:stableId,color:'#b1daca',...value};db.accounts.push(a);addedAccounts++}}
 for(const r of payload.transactions){const a=db.accounts.find(a=>a.enableAccountId===String(r.account_id));if(!a||r.future)continue;const ref=String(r.id);if(r.deleted){const before=db.transactions.length;db.transactions=db.transactions.filter(t=>t.enableTransactionId!==ref);deletedTx+=before-db.transactions.length;continue}const merchant=String(r.clean_description||r.provider_description||'Opération bancaire').slice(0,160),value=round(num(r.amount)),date=String(r.date||'').slice(0,10);if(!/^\d{4}-\d{2}-\d{2}$/.test(date))continue;let t=db.transactions.find(t=>t.enableTransactionId===ref);if(t){if(t.amount!==value)t.splits=[];Object.assign(t,{accountId:a.id,date,amount:value,enableTransactionId:ref,source:'enablebanking'});updatedTx++}else{db.transactions.push({id:'ebt-'+ref,accountId:a.id,date,amount:value,merchant,category:inferCategory(merchant,value),notes:'',source:'enablebanking',enableTransactionId:ref,reconciled:false,splits:[]});addedTx++}const override=(db.bankOverrides||{})[ref];if(override){const item=db.transactions.find(t=>t.enableTransactionId===ref);if(item)Object.assign(item,{category:String(override.category||item.category),notes:String(override.notes||''),merchant:String(override.merchant||item.merchant),reconciled:!!override.reconciled,splits:Array.isArray(override.splits)?override.splits:[]})}}
 if(payload.accounts.length){db.demo=false}persist();return {addedAccounts,addedTx,updatedTx,deletedTx}}
