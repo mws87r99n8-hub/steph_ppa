@@ -1,0 +1,19 @@
+# Secure, password-free link from the existing Cadran web service
+# to the existing PostgreSQL database in the same Render workspace.
+# Existing ENABLE_BANKING_* / APP_* secrets are intentionally omitted
+# and should be preserved by Render on Blueprint adoption.
+services:
+  - type: web
+    name: cadran-budget-connect
+    runtime: python
+    plan: free
+    region: frankfurt
+    repo: https://github.com/mws87r99n8-hub/steph_ppa
+    branch: main
+    buildCommand: pip install -r cadran/requirements.txt
+    startCommand: cd cadran && uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cadran-secure-db
+          property: connectionString
