@@ -481,7 +481,13 @@ async function hydrateServerData(){
     if(remote.bank&&Array.isArray(remote.bank.accounts)&&Array.isArray(remote.bank.transactions)){
       importEnableBankingData(remote.bank);
     }else{persist()}
+    // Older CSV / OFX imports also benefit from the latest merchant rules.
+    // Save only actual changes; do not overwrite confirmed manual categories.
+    const reclassified=recategorizeImportedExpenses();
     cloud.ready=true;cloud.error='';cloudIndicator('Sauvegarde sécurisée');
+    if(reclassified.changed){
+      cloud.paused=false;persist();cloud.paused=true;
+    }
     render();return true;
   }finally{cloud.paused=false}
 }
