@@ -330,16 +330,40 @@ async def sync(request: Request):
     if session.get("status") != "AUTHORIZED":
         raise HTTPException(409, "Consentement SG expiré ou révoqué. Reconnectez la banque.")
     account_data = session.get("accounts_data") or []
-    if not isinstance(account_data, list):
-        raise HTTPException(502, "Liste des comptes incorrecte.")
+    account_ids = session.get("accounts") or []
+    if not isinstance(account_data, list) or not isinstance(account_ids, list):
+        raise HTTPException(502, "Liste des comptes Enable Banking incorrecte.")
+    # The API exposes both accounts_data and accounts. Use the union of valid
+    # session-scoped UUIDs: the short accounts list can still be present when
+    # accounts_data is empty. No bank account IDs are returned to the browser.
+    authorized = {}
+    for mapping in account_data:
+        if not isinstance(mapping, dict):
+            continue
+        try:
+            uid = str(UUID(str(mapping.get("uid") or "")))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        authorized[uid] = mapping
+    for raw_uid in account_ids:
+        try:
+            uid = str(UUID(str(raw_uid)))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        authorized.setdefault(uid, {"uid": uid})
+    if not authorized:
+        LOGGER.warning("SG session authorized but no accessible accounts: accounts_data=%d accounts=%d",
+                       len(account_data), len(account_ids))
+        raise HTTPException(
+            409,
+            "Consentement SG valide, mais Enable Banking ne renvoie aucun compte. "
+            "Si l'application est en Production restreinte, associez les comptes SG "
+            "dans Enable Banking (API applications > comptes liés), puis renouvelez "
+            "le consentement dans Cadran."
+        )
     accounts, transactions, seen = [], [], set()
     date_from = (datetime.now(timezone.utc) - timedelta(days=89)).date().isoformat()
-    for mapping in account_data[:30]:
-        uid = str(mapping.get("uid") or "")
-        try:
-            UUID(uid)
-        except ValueError:
-            continue
+    for uid, mapping in list(authorized.items())[:30]:
         public_account_id = global_id(str(mapping.get("identification_hash") or uid))
         detail = await eb("GET", f"/accounts/{uid}/details")
         currency = detail.get("currency") or "EUR"
@@ -381,7 +405,7 @@ async def sync(request: Request):
         else:
             raise HTTPException(502, "Trop de pages de transactions bancaires.")
     if not accounts:
-        raise HTTPException(502, "Aucun compte SG en euros accessible. Vérifiez le consentement.")
+        raise HTTPException(409, "Des comptes ont été autorisés, mais aucun compte en euros exploitable n’a été identifié. Vérifiez les comptes SG sélectionnés et leur devise dans Enable Banking.")
     return {"source": "Enable Banking", "accounts": accounts, "transactions": transactions,
             "lastSync": int(time.time()), "consentValidUntil": consent.get("valid_until"),
             "periodStart": date_from}
