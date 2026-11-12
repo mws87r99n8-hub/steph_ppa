@@ -378,22 +378,37 @@ async def sync(request: Request):
     for uid, mapping in list(authorized.items())[:30]:
         public_account_id = global_id(str(mapping.get("identification_hash") or uid))
         detail = await eb("GET", f"/accounts/{uid}/details")
-        # Compare normalized ISO 4217 codes. Only accept EUR, without silently
-        # relabeling or converting another account currency as euros.
+        # The account-level currency can legitimately be XXX (unspecified or
+        # multi-currency). In that case, use the explicit balance currency:
+        # XXX must never be interpreted automatically as EUR.
         currency = normalized_currency(detail.get("currency"))
-        if currency and currency != "EUR":
+        if currency not in ("EUR", "XXX", ""):
             rejected_currencies[currency] += 1
             continue
         balances = await eb("GET", f"/accounts/{uid}/balances")
         items = balances.get("balances", [])
         if not isinstance(items, list):
             raise HTTPException(502, "Format des soldes bancaires non reconnu.")
-        selected = next((b for kind in ("CLBD","ITBD","CLAV","ITAV","PRCD","OPBD") for b in items
-                         if isinstance(b, dict) and b.get("balance_type") == kind and
-                         isinstance(b.get("balance_amount"), dict) and
-                         normalized_currency(b["balance_amount"].get("currency")) == "EUR"), None)
+        euro_balances = [
+            b for b in items
+            if isinstance(b, dict) and isinstance(b.get("balance_amount"), dict)
+            and normalized_currency(b["balance_amount"].get("currency")) == "EUR"
+        ]
+        selected = next((
+            b for kind in ("CLBD", "ITBD", "CLAV", "ITAV", "XPCD", "PRCD", "OPBD")
+            for b in euro_balances if b.get("balance_type") == kind
+        ), euro_balances[0] if euro_balances else None)
         if selected is None:
-            raise HTTPException(502, "Aucun solde EUR fourni pour un compte SG. Aucune donnée n'a été modifiée.")
+            # A bank can expose several currencies. Skip only this account
+            # instead of making all other authorized EUR accounts unavailable.
+            codes = {
+                normalized_currency(b.get("balance_amount", {}).get("currency"))
+                for b in items if isinstance(b, dict)
+                and isinstance(b.get("balance_amount"), dict)
+            }
+            for code in codes or {currency or "INCONNUE"}:
+                rejected_currencies[code or "INCONNUE"] += 1
+            continue
         balance = safe_money((selected.get("balance_amount") or {}).get("amount"))
         accounts.append({"id": public_account_id,
                          "name": str(detail.get("name") or "Compte Société Générale")[:100],
@@ -425,13 +440,13 @@ async def sync(request: Request):
     if not accounts:
         if rejected_currencies:
             summary = ", ".join(f"{code} ({count})" for code, count in sorted(rejected_currencies.items()))
-            LOGGER.warning("SG currency mismatch: %s", summary)
+            LOGGER.warning("SG no EUR balances; observed balance currencies: %s", summary)
             raise HTTPException(409,
-                "Les comptes autorisés ont une devise différente de EUR selon Enable Banking : "
-                + summary + ". Cadran ne convertit pas de devises sans taux vérifié. "
-                "Vérifiez la devise des comptes concernés dans Enable Banking, puis renouvelez "
-                "le consentement si nécessaire.")
-        raise HTTPException(409, "Comptes SG autorisés, mais aucun compte EUR exploitable identifié. Vérifiez les soldes transmis par la banque.")
+                "Aucun solde en euros fourni par Enable Banking pour ces comptes. "
+                "Devises des soldes : " + summary + ". "
+                "Le code XXX au niveau du compte n'est pas bloquant ; vérifiez "
+                "la devise des soldes dans Enable Banking.")
+        raise HTTPException(409, "Comptes SG autorisés, mais aucun solde EUR exploitable identifié.")
     return {"source": "Enable Banking", "accounts": accounts, "transactions": transactions,
             "lastSync": int(time.time()), "consentValidUntil": consent.get("valid_until"),
             "periodStart": date_from}
