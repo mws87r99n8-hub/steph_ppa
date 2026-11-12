@@ -192,16 +192,18 @@ function manualSnapshot(){
     if(t.source==='enablebanking'&&/^[0-9a-f]{64}$/.test(String(t.enableTransactionId||''))){
       overrides[t.enableTransactionId]={category:String(t.category||'Autres'),
         manualCategory:typeof t.categoryManual==='boolean'?t.categoryManual:null,
+        subcategory:String(t.subcategory||''),
+        manualSubcategory:typeof t.subcategoryManual==='boolean'?t.subcategoryManual:null,
         notes:String(t.notes||''),merchant:String(t.merchant||''),
         reconciled:!!t.reconciled,splits:Array.isArray(t.splits)?t.splits:[]};
     }
   }
-  return {...db,bankOverrides:overrides,categoryRules:db.categoryRules||{},
+  return {...db,bankOverrides:overrides,categoryRules:db.categoryRules||{},subcategoryRules:db.subcategoryRules||{},
     accounts:db.accounts.filter(a=>!ids.has(a.id)),
     transactions:db.transactions.filter(t=>t.source!=='enablebanking'),recurring:db.recurring};
 }
-function hasUserManualData(x){return !!(x&&!x.demo&&((x.accounts||[]).length||(x.transactions||[]).length||(x.recurring||[]).length||Object.keys(x.budgets||{}).length||Object.keys(x.bankOverrides||{}).length||Object.keys(x.bankAliases||{}).length||Object.keys(x.categoryRules||{}).length))}
-function emptyManual(){return {version:1,demo:false,accounts:[],transactions:[],budgets:{},recurring:[],settings:{hidden:false},imported:[],bankOverrides:{},bankAliases:{},categoryRules:{}}}
+function hasUserManualData(x){return !!(x&&!x.demo&&((x.accounts||[]).length||(x.transactions||[]).length||(x.recurring||[]).length||Object.keys(x.budgets||{}).length||Object.keys(x.bankOverrides||{}).length||Object.keys(x.bankAliases||{}).length||Object.keys(x.categoryRules||{}).length||Object.keys(x.subcategoryRules||{}).length))}
+function emptyManual(){return {version:1,demo:false,accounts:[],transactions:[],budgets:{},recurring:[],settings:{hidden:false},imported:[],bankOverrides:{},bankAliases:{},categoryRules:{},subcategoryRules:{}}}
 function cloudIndicator(label,error=false){const node=byId('cloud-status');if(node){node.textContent=label;node.title=label;node.style.color=error?'#bd4c58':'#62826d'}}
 function persist(){
   const safe=manualSnapshot();
@@ -673,20 +675,43 @@ function rememberMerchantCategory(merchant,category){
   return true;
 }
 function recategorizeImportedExpenses(){
-  let changed=0,uncertain=0;
+  let changed=0,subcategorized=0,uncertain=0,protectedEdits=0;
   for(const tx of db.transactions){
-    if(!tx||!['enablebanking','csv','qif','ofx'].includes(tx.source)||num(tx.amount)>=0)continue;
+    if(!tx||!Number.isFinite(Number(tx.amount)))continue;
+    const fromImport=['enablebanking','csv','qif','ofx'].includes(tx.source);
     const provider=tx.providerMerchant||tx.merchant;
-    if(isManualImportedCategory(tx,provider,tx.amount)||Array.isArray(tx.splits)&&tx.splits.length){
-      tx.categoryManual=true;
-      continue;
+    const hasSplits=Array.isArray(tx.splits)&&tx.splits.length>0;
+    // A handwritten transaction's category is always user-provided.
+    const protectedCategory=!fromImport||isManualImportedCategory(tx,provider,tx.amount)||hasSplits;
+    if(fromImport&&num(tx.amount)<0){
+      if(protectedCategory){
+        tx.categoryManual=true;protectedEdits++;
+      }else{
+        const predicted=inferCategory(provider,tx.amount);
+        if(tx.category!==predicted){tx.category=predicted;changed++}
+        tx.categoryManual=false;
+      }
     }
-    const predicted=inferCategory(provider,tx.amount);
-    if(tx.category!==predicted){tx.category=predicted;changed++}
-    tx.categoryManual=false;
-    if(predicted==='Autres')uncertain++;
+    const category=CATEGORIES[tx.category]?tx.category:'Autres';
+    if(tx.subcategoryManual!==true){
+      const subtype=inferSubcategory(provider,category,tx.amount);
+      if(tx.subcategory!==subtype){tx.subcategory=subtype;changed++;subcategorized++}
+      tx.subcategoryManual=false;
+    }else if(!validSubcategory(category,tx.subcategory)){
+      // Keep the user's original annotation in their JSON backup. Display a
+      // valid default if they changed its parent category separately.
+      tx.subcategory=inferSubcategory(provider,category,tx.amount);
+      tx.subcategoryManual=false;changed++;subcategorized++;
+    }
+    for(const part of tx.splits||[]){
+      if(!part||!CATEGORIES[part.category])continue;
+      if(!validSubcategory(part.category,part.subcategory)){
+        part.subcategory=inferSubcategory(provider,part.category,tx.amount);changed++;subcategorized++;
+      }
+    }
+    if(fromImport&&num(tx.amount)<0&&tx.category==='Autres')uncertain++;
   }
-  return {changed,uncertain};
+  return {changed,subcategorized,uncertain,protectedEdits};
 }
 
 function importEnableBankingData(payload){
