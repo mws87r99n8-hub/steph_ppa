@@ -657,7 +657,33 @@ const AUTO_CATEGORY_PATTERNS=[
  ['Alimentation', [/\b(?:CARREFOUR|AUCHAN|INTERMARCHE|LECLERC|E LECLERC|LIDL|ALDI|MONOPRIX|PICARD|CASINO|GRAND FRAIS|BIOCOOP|BOULANGERIE|PATISSERIE|PRIMEUR|BOUCHERIE|POISSONNERIE|SUPERMARCHE|HYPERMARCHE|SUPER U|HYPER U|SYSTEME U|FRANPRIX|LEADER PRICE|NETTO|PROXI)\b/]],
  ['Achats', [/\b(?:AMAZON|AMZN|TEMU|ALIEXPRESS|VINTED|ZALANDO|CDISCOUNT|FNAC|DARTY|BOULANGER|LEROY MERLIN|CASTORAMA|BRICO DEPOT|IKEA|DECATHLON|INTERSPORT|ACTION|H AND M|ZARA|KIABI|PRIMARK|LA REDOUTE|SHEIN|MANOMANO|BUT|CONFORAMA)\b/]]
 ];
-function inferCategory(merchant,amount){
+// Codes MCC ISO 18245 fournis par la banque (facultatifs). Les codes
+// ambigus ne sont jamais utilisés pour attribuer une catégorie.
+const BANK_MCC_CATEGORIES={
+ '5411':['Alimentation','Courses alimentaires'],'5422':['Alimentation','Produits frais'],
+ '5441':['Alimentation','Produits frais'],'5451':['Alimentation','Produits frais'],
+ '5462':['Alimentation','Boulangerie'],'5499':['Alimentation','Courses alimentaires'],
+ '5812':['Loisirs','Restaurants et livraison'],'5813':['Loisirs','Restaurants et livraison'],
+ '5814':['Loisirs','Restaurants et livraison'],
+ '5541':['Transport','Carburant'],'5542':['Transport','Carburant'],
+ '5983':['Transport','Carburant'],'4784':['Transport','Péages'],
+ '7523':['Transport','Stationnement'],'4111':['Transport','Transport collectif'],
+ '4112':['Transport','Transport collectif'],'4131':['Transport','Transport collectif'],
+ '4121':['Transport','Taxis et mobilité'],
+ '4814':['Abonnements','Téléphonie et internet'],
+ '4899':['Abonnements','Téléphonie et internet'],
+ '5912':['Santé','Pharmacie'],'8011':['Santé','Consultations et soins'],
+ '8021':['Santé','Consultations et soins'],'8042':['Santé','Optique'],
+ '8043':['Santé','Optique'],'7011':['Loisirs','Voyages et hébergement'],
+ '4722':['Loisirs','Voyages et hébergement'],
+ '7832':['Loisirs','Culture et spectacles'],
+ '5311':['Achats','Autres achats'],'5621':['Achats','Vêtements'],
+ '5631':['Achats','Vêtements'],'5651':['Achats','Vêtements'],
+ '5691':['Achats','Vêtements'],'5200':['Achats','Maison et bricolage'],
+ '5211':['Achats','Maison et bricolage'],'5251':['Achats','Maison et bricolage'],
+ '5732':['Achats','Autres achats'],'5941':['Achats','Sport et équipement']
+};
+function inferCategory(merchant,amount,mcc=''){
   if(num(amount)>0)return 'Revenus';
   const key=merchantCategoryRuleKey(merchant);
   const learned=key&&(db.categoryRules||{})[key];
@@ -666,7 +692,7 @@ function inferCategory(merchant,amount){
   for(const [category,expressions] of AUTO_CATEGORY_PATTERNS){
     if(expressions.some(expr=>expr.test(label)))return category;
   }
-  return 'Autres';
+  return BANK_MCC_CATEGORIES[String(mcc||'')]?.[0]||'Autres';
 }
 
 const SUBCATEGORIES={
@@ -736,7 +762,7 @@ const AUTO_SUBCATEGORY_PATTERNS={
   ['Remboursements',/\b(?:REMBOURSEMENT|REMBT|INDEMNITE)\b/]
  ]
 };
-function inferSubcategory(merchant,category,amount){
+function inferSubcategory(merchant,category,amount,mcc=''){
   if(!SUBCATEGORIES[category])return 'À préciser';
   const key=merchantCategoryRuleKey(merchant);
   const learned=key&&(db.subcategoryRules||{})[key];
@@ -745,6 +771,8 @@ function inferSubcategory(merchant,category,amount){
   for(const [subcategory,expression] of AUTO_SUBCATEGORY_PATTERNS[category]||[]){
     if(expression.test(label))return subcategory;
   }
+  const mccCategory=BANK_MCC_CATEGORIES[String(mcc||'')];
+  if(mccCategory?.[0]===category&&SUBCATEGORIES[category]?.includes(mccCategory[1]))return mccCategory[1];
   return category==='Virement'?'Autres virements':category==='Revenus'?'Autres revenus':'À préciser';
 }
 function rememberMerchantSubcategory(merchant,category,subcategory){
@@ -784,14 +812,14 @@ function recategorizeImportedExpenses(){
       if(protectedCategory){
         tx.categoryManual=true;protectedEdits++;
       }else{
-        const predicted=inferCategory(provider,tx.amount);
+        const predicted=inferCategory(provider,tx.amount,tx.merchantCategoryCode);
         if(tx.category!==predicted){tx.category=predicted;changed++}
         tx.categoryManual=false;
       }
     }
     const category=CATEGORIES[tx.category]?tx.category:'Autres';
     if(tx.subcategoryManual!==true){
-      const subtype=inferSubcategory(provider,category,tx.amount);
+      const subtype=inferSubcategory(provider,category,tx.amount,tx.merchantCategoryCode);
       if(tx.subcategory!==subtype){tx.subcategory=subtype;changed++;subcategorized++}
       tx.subcategoryManual=false;
     }else if(!validSubcategory(category,tx.subcategory)){
@@ -803,7 +831,7 @@ function recategorizeImportedExpenses(){
     for(const part of tx.splits||[]){
       if(!part||!CATEGORIES[part.category])continue;
       if(!validSubcategory(part.category,part.subcategory)){
-        part.subcategory=inferSubcategory(provider,part.category,tx.amount);changed++;subcategorized++;
+        part.subcategory=inferSubcategory(provider,part.category,tx.amount,tx.merchantCategoryCode);changed++;subcategorized++;
       }
     }
     if(fromImport&&num(tx.amount)<0&&tx.category==='Autres')uncertain++;
@@ -858,6 +886,7 @@ function importEnableBankingData(payload){
     if(!/^\d{4}-\d{2}-\d{2}$/.test(date))continue;
     const override=(db.bankOverrides||{})[ref];
     const previous=db.transactions.find(t=>t.enableTransactionId===ref);
+    const merchantCategoryCode=String(r.merchant_category_code||previous?.merchantCategoryCode||'').slice(0,4);
     const legacy=legacyInferCategory(rawMerchant,amount);
     const explicitManual=override
       ?(typeof override.manualCategory==='boolean'?override.manualCategory:
@@ -866,13 +895,13 @@ function importEnableBankingData(payload){
     const shownMerchant=String(override?.merchant||previous?.merchant||rawMerchant).slice(0,160);
     const category=explicitManual
       ?String(override?.category||previous?.category||legacy)
-      :inferCategory(rawMerchant,amount);
-    const safeCategory=CATEGORIES[category]?category:inferCategory(rawMerchant,amount);
+      :inferCategory(rawMerchant,amount,merchantCategoryCode);
+    const safeCategory=CATEGORIES[category]?category:inferCategory(rawMerchant,amount,merchantCategoryCode);
     const explicitSubcategory=typeof override?.manualSubcategory==='boolean'
       ?override.manualSubcategory:previous?.subcategoryManual===true;
     const priorSubcategory=String(override?.subcategory||previous?.subcategory||'');
     const subcategory=explicitSubcategory&&validSubcategory(safeCategory,priorSubcategory)
-      ?priorSubcategory:inferSubcategory(rawMerchant,safeCategory,amount);
+      ?priorSubcategory:inferSubcategory(rawMerchant,safeCategory,amount,merchantCategoryCode);
     const manualSubcategory=explicitSubcategory&&validSubcategory(safeCategory,priorSubcategory);
     const note=String(override?.notes??previous?.notes??'').slice(0,300);
     const reconciled=override?!!override.reconciled:!!previous?.reconciled;
@@ -881,13 +910,13 @@ function importEnableBankingData(payload){
     const splits=Math.abs(splitSum-Math.abs(amount))<0.06?oldSplits:[];
     if(previous){
       Object.assign(previous,{accountId:a.id,date,amount,providerMerchant:rawMerchant,merchant:shownMerchant,
-        category:safeCategory,categoryManual:explicitManual,
+        merchantCategoryCode,category:safeCategory,categoryManual:explicitManual,
         subcategory,subcategoryManual:manualSubcategory,notes:note,reconciled,splits,
         enableTransactionId:ref,source:'enablebanking'});
       updatedTx++;
     }else{
       db.transactions.push({id:'ebt-'+ref,accountId:a.id,date,amount,providerMerchant:rawMerchant,
-        merchant:shownMerchant,category:safeCategory,categoryManual:explicitManual,
+        merchant:shownMerchant,merchantCategoryCode,category:safeCategory,categoryManual:explicitManual,
         subcategory,subcategoryManual:manualSubcategory,notes:note,reconciled,splits,
         source:'enablebanking',enableTransactionId:ref});
       addedTx++;
