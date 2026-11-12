@@ -182,6 +182,85 @@ class PasswordInput(BaseModel):
 async def healthz():
     return {"ok": True, "provider": "Enable Banking", "bankConfigured": configured(), "storageConfigured": storage.configured()}
 
+class ManualStateUpdate(BaseModel):
+    revision: int = Field(ge=0)
+    state: dict
+
+
+def sanitize_manual_state(value: dict) -> dict:
+    """Only personal manual data may be changed from the browser.
+
+    Provider accounts and transactions are managed by the bank sync route and
+    cannot be overwritten by a browser-side backup or a second device.
+    """
+    if not isinstance(value, dict):
+        raise HTTPException(422, "Format de sauvegarde incorrect.")
+    for key in ("accounts", "transactions", "recurring", "imported"):
+        if key in value and not isinstance(value[key], list):
+            raise HTTPException(422, "Structure de sauvegarde incorrecte.")
+    if not isinstance(value.get("budgets", {}), dict) or not isinstance(value.get("settings", {}), dict):
+        raise HTTPException(422, "Budgets ou paramètres incorrects.")
+    accounts = [a for a in value.get("accounts", []) if isinstance(a, dict)
+                and a.get("manual") is not False and not a.get("enableAccountId")]
+    ids = {str(a.get("id")) for a in accounts}
+    txns = [t for t in value.get("transactions", []) if isinstance(t, dict)
+            and t.get("source") != "enablebanking"
+            and str(t.get("accountId")) in ids]
+    recurring = [r for r in value.get("recurring", []) if isinstance(r, dict)
+                 and str(r.get("accountId", "")) in ids]
+    if len(accounts) > 300 or len(txns) > 30000 or len(recurring) > 10000:
+        raise HTTPException(413, "Trop d'enregistrements pour cette sauvegarde.")
+    return {
+        "version": 1, "demo": False,
+        "accounts": accounts, "transactions": txns,
+        "budgets": value.get("budgets", {}),
+        "recurring": recurring,
+        "settings": value.get("settings", {"hidden": False}),
+        "imported": value.get("imported", []),
+    }
+
+
+@app.get("/api/data/status")
+async def data_status(request: Request):
+    return {"storageConfigured": storage.configured(),
+            "authenticated": bool(configured() and login_cookie(request))}
+
+
+@app.get("/api/data")
+async def load_private_data(request: Request):
+    require_login(request)
+    if not storage.configured():
+        raise HTTPException(503, "Base de données Cadran non raccordée sur Render.")
+    try:
+        manual, revision = await asyncio.to_thread(storage.read, "manual")
+        bank, _ = await asyncio.to_thread(storage.read, "bank")
+    except Exception:
+        LOGGER.error("Unable to load encrypted user data from private storage")
+        raise HTTPException(503, "Stockage sécurisé inaccessible. Aucune donnée n'a été modifiée.")
+    return {"manual": manual, "revision": revision,
+            "bank": bank, "hasManualData": manual is not None}
+
+
+@app.put("/api/data/manual")
+async def save_private_data(request: Request, payload: ManualStateUpdate):
+    require_login(request)
+    if not storage.configured():
+        raise HTTPException(503, "Base de données Cadran non raccordée sur Render.")
+    clean = sanitize_manual_state(payload.state)
+    try:
+        revision = await asyncio.to_thread(
+            storage.write, "manual", clean, expected_revision=payload.revision
+        )
+    except storage.StorageConflict:
+        raise HTTPException(409, "Données modifiées sur un autre appareil. Rechargez Cadran avant de réessayer.")
+    except ValueError:
+        raise HTTPException(413, "Sauvegarde trop volumineuse.")
+    except Exception:
+        LOGGER.error("Unable to save encrypted user data to private storage")
+        raise HTTPException(503, "Sauvegarde serveur impossible. Ne fermez pas la page avant d'avoir exporté un JSON.")
+    return {"saved": True, "revision": revision}
+
+
 @app.get("/api/bank/status")
 async def status(request: Request):
     logged = configured() and login_cookie(request)
