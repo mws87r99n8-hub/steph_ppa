@@ -205,6 +205,29 @@ function applyRecurring(id,date){const r=db.recurring.find(x=>x.id===id);if(!r)r
 function deleteRecurring(id){if(!confirm('Supprimer définitivement cette échéance future ?'))return;db.recurring=db.recurring.filter(r=>r.id!==id);persist();closeModal();render();toast('Échéance supprimée.')}
 // --- Banque : un serveur optionnel effectue les appels Enable Banking. Aucun secret dans le navigateur. ---
 async function api(path,options={}){const r=await fetch(path,{credentials:'same-origin',headers:{'Content-Type':'application/json','X-Requested-With':'Cadran',...(options.headers||{})},...options});let data;try{data=await r.json()}catch(e){data={error:`Erreur HTTP ${r.status}`}}if(!r.ok)throw Error(data.error||`Erreur HTTP ${r.status}`);return data}
+async function hydrateServerData(){
+  if(!cloud.enabled)return false;
+  const remote=await api('/api/data');
+  const local=manualSnapshot();
+  const hadLocal=hasUserManualData(local);
+  cloud.ready=false;cloud.paused=true;cloud.revision=Number(remote.revision||0);
+  try{
+    if(remote.manual){
+      if(hadLocal&&JSON.stringify(local)!==JSON.stringify(remote.manual)){
+        try{if(!localStorage.getItem(KEY+'-precloud'))localStorage.setItem(KEY+'-precloud',JSON.stringify(local))}catch(e){}
+      }
+      db={...remote.manual};
+    }else if(hadLocal){
+      const saved=await api('/api/data/manual',{method:'PUT',body:JSON.stringify({revision:0,state:local})});
+      cloud.revision=saved.revision;db={...local,demo:false};
+    }else{db=emptyManual()}
+    if(remote.bank&&Array.isArray(remote.bank.accounts)&&Array.isArray(remote.bank.transactions)){
+      importEnableBankingData(remote.bank);
+    }else{persist()}
+    cloud.ready=true;cloud.error='';cloudIndicator('Sauvegarde sécurisée');
+    render();return true;
+  }finally{cloud.paused=false}
+}
 async function readBankStatus(){try{const s=await api('/api/bank/status');bankState={...s,error:''}}catch(err){bankState={configured:false,authenticated:false,provider:'Enable Banking',error:location.protocol==='file:'?'Mode hors ligne. Serveur nécessaire pour la connexion bancaire.':'Serveur bancaire indisponible.'}}return bankState}
 async function openBank(){if(location.hostname==='cadran-budget.onrender.com'){modal={type:'bank-static'};openModal('Connexion bancaire','La synchronisation bancaire est disponible sur Cadran Connect.',`<div class="stack-18"><div class="notice warning"><strong>Cette adresse est une version statique.</strong>La connexion Société Générale nécessite le serveur Cadran Connect. Les données stockées localement ne sont pas partagées automatiquement entre les deux adresses.</div><a class="btn btn-dark w100" href="https://cadran-budget-connect.onrender.com/" rel="noopener noreferrer">Ouvrir Cadran Connect</a></div>`);return}modal={type:'bank'};await readBankStatus();bankModal()}
 function bankModal(){
@@ -228,7 +251,7 @@ function bankModal(){
     <p class="footnote"><a href="/privacy.html" target="_blank" rel="noopener noreferrer">Confidentialité</a> · <a href="/terms.html" target="_blank" rel="noopener noreferrer">Conditions d’utilisation</a></p>
   </div>`);
 }
-async function loginBank(form){const pw=String(new FormData(form).get('password')||'');if(!pw)return;const button=form.querySelector('button[type=submit]');button.disabled=true;try{await api('/api/bank/login',{method:'POST',body:JSON.stringify({password:pw})});await readBankStatus();if(bankState.connected){closeModal();await syncBank()}else{bankModal();toast('Module bancaire déverrouillé.')}}catch(err){toast('Authentification refusée : '+err.message,true);button.disabled=false}}
+async function loginBank(form){const pw=String(new FormData(form).get('password')||'');if(!pw)return;const button=form.querySelector('button[type=submit]');button.disabled=true;try{await api('/api/bank/login',{method:'POST',body:JSON.stringify({password:pw})});await readBankStatus();if(cloud.enabled){const state=await api('/api/data/status');if(state.storageConfigured)await hydrateServerData()}if(bankState.connected){closeModal();if(cloud.ready||!cloud.enabled)await syncBank()}else{bankModal();toast('Cadran déverrouillé. Données serveur chargées si disponibles.')}}catch(err){toast('Ouverture Cadran impossible : '+err.message,true);button.disabled=false}}
 async function connectBank(){try{toast('Préparation du parcours sécurisé Société Générale…');const {url}=await api('/api/bank/connect',{method:'POST',body:'{}'});const dest=new URL(url);if(dest.protocol!=='https:'||!(dest.hostname==='enablebanking.com'||dest.hostname.endsWith('.enablebanking.com')))throw Error('URL de consentement non autorisée');window.location.assign(dest.href)}catch(err){toast('Connexion Société Générale : '+err.message,true)}}
 function inferCategory(merchant,amount){if(amount>0)return 'Revenus';const s=merchant.toUpperCase();if(/CARREFOUR|AUCHAN|INTERMARCHE|LECLERC|LIDL|ALDI|SUPER U|MONOPRIX|PICARD|CASINO/.test(s))return 'Alimentation';if(/SNCF|SHELL|TOTAL|ESSO|BP |AUTOROUTE|UBER|BOLT|TAXI|METRO|PARKING/.test(s))return 'Transport';if(/NETFLIX|SPOTIFY|DISNEY|APPLE\.COM|FREE MOBILE|SFR|BOUYGUES|ORANGE/.test(s))return 'Abonnements';if(/EDF|ENGIE|LOYER|GAZ|EAU|SYNDIC/.test(s))return 'Logement';if(/PHARMAC|DOCTEUR|DENT|SANTE|MUTUELLE/.test(s))return 'Santé';if(/RESTAURANT|CAFE|CINEMA|BOWLING|HOTEL/.test(s))return 'Loisirs';return 'Autres'}
 function importEnableBankingData(payload){if(!Array.isArray(payload.accounts)||!Array.isArray(payload.transactions))throw Error('Réponse bancaire non reconnue');let addedAccounts=0,addedTx=0,updatedTx=0,deletedTx=0;const ts=isoDay();for(const r of payload.accounts){if(r.currency_code!=='EUR')continue;const remote=String(r.id);let a=db.accounts.find(a=>a.enableAccountId===remote);const value={name:String(r.name||'Compte bancaire').slice(0,100),type:String(r.type||'checking'),bank:'Société Générale',balance:round(num(r.balance)),currency:'EUR',manual:false,enableAccountId:remote,updatedAt:r.updated_at||ts};if(a)Object.assign(a,value);else {a={id:uid(),color:'#b1daca',...value};db.accounts.push(a);addedAccounts++}}
@@ -264,7 +287,39 @@ document.addEventListener('change',e=>{if(e.target.id==='filter-account'){accoun
 byId('csv-picker').addEventListener('change',async e=>{const f=e.target.files?.[0];if(!f)return;try{await processImportFile(f,'bank')}catch(err){toast('Import impossible : '+err.message,true)}});
 byId('json-picker').addEventListener('change',async e=>{const f=e.target.files?.[0];if(!f)return;try{await processImportFile(f,'json')}catch(err){toast('Restauration : '+err.message,true)}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&byId('modal-host').children.length)closeModal();if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();navigate('transactions');byId('search-operations')?.focus()}});
-const bankCallbackPending=new URLSearchParams(location.search).has('bank_callback');render();readBankStatus().then(status=>{if(view==='accounts')render();if(!bankCallbackPending&&status.authenticated&&status.connected&&location.hostname==='cadran-budget-connect.onrender.com'&&!db.demo)refreshAuthorizedBankAccounts()});if(bankCallbackPending){const params=new URLSearchParams(location.search),ok=params.get('bank_callback')==='1';const url=new URL(location.href);url.searchParams.delete('bank_callback');history.replaceState({},'',url.pathname+url.search+url.hash);navigate('accounts');toast(ok?'Consentement Société Générale reçu. Synchronisation initiale en cours…':'Consentement SG non validé ou session expirée.',!ok);if(ok){readBankStatus().then(status=>{if(status.authenticated&&status.connected)syncBank()}).catch(()=>{})}}
+render();
+async function bootstrapCadran(){
+  const callback=new URLSearchParams(location.search).get('bank_callback');
+  await readBankStatus();
+  if(cloud.enabled){
+    try{
+      const state=await api('/api/data/status');
+      if(!state.storageConfigured){
+        cloudIndicator('Base serveur à raccorder',true);
+        toast('Base sécurisée à raccorder dans Render. La sauvegarde locale reste disponible.',true);
+      }else if(state.authenticated){
+        await hydrateServerData();
+      }else{
+        cloudIndicator('Cadran verrouillé');
+        await openBank();
+      }
+    }catch(err){
+      cloudIndicator('Stockage serveur indisponible',true);
+      toast('Stockage serveur indisponible : données locales conservées, mais non partagées.',true);
+    }
+  }
+  if(callback!==null){
+    const u=new URL(location.href);u.searchParams.delete('bank_callback');
+    history.replaceState({},'',u.pathname+u.search+u.hash);
+    navigate('accounts');
+    const ok=callback==='1';
+    toast(ok?'Autorisation Société Générale enregistrée.':'Autorisation bancaire non validée.',!ok);
+    if(ok&&bankState.authenticated&&bankState.connected)syncBank();
+  }else if(bankState.authenticated&&bankState.connected&&(!cloud.enabled||cloud.ready)&&!db.demo){
+    refreshAuthorizedBankAccounts();
+  }else if(view==='accounts')render();
+}
+bootstrapCadran().catch(()=>toast('Initialisation incomplète : recharge Cadran.',true));
 
 if('serviceWorker' in navigator && location.protocol.startsWith('http'))window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
 
