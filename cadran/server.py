@@ -243,6 +243,9 @@ def sanitize_manual_state(value: dict) -> dict:
             "category": str(entry.get("category", "Autres"))[:80],
             "manualCategory": (bool(entry["manualCategory"])
                                if isinstance(entry.get("manualCategory"), bool) else None),
+            "subcategory": str(entry.get("subcategory") or "")[:70],
+            "manualSubcategory": (bool(entry["manualSubcategory"])
+                                  if isinstance(entry.get("manualSubcategory"), bool) else None),
             "notes": str(entry.get("notes", ""))[:300],
             "merchant": str(entry.get("merchant", ""))[:160],
             "reconciled": bool(entry.get("reconciled", False)),
@@ -262,6 +265,28 @@ def sanitize_manual_state(value: dict) -> dict:
                 and all(ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " for ch in merchant)
                 and isinstance(category, str) and category in expense_categories):
             category_rules[merchant] = category
+    original_subcategory_rules = value.get("subcategoryRules") or {}
+    if not isinstance(original_subcategory_rules, dict) or len(original_subcategory_rules) > 2000:
+        raise HTTPException(413, "Trop de règles de sous-catégories.")
+    valid_subcategories = {
+        "Courses alimentaires", "Boulangerie", "Produits frais", "Autres courses",
+        "Loyer", "Électricité et gaz", "Eau", "Charges et copropriété",
+        "Carburant", "Péages", "Transport collectif", "Stationnement",
+        "Taxis et mobilité", "Entretien automobile",
+        "Téléphonie et internet", "Streaming et musique", "Logiciels et cloud", "Autres abonnements",
+        "Restaurants et livraison", "Culture et spectacles", "Voyages et hébergement", "Sport et loisirs",
+        "Pharmacie", "Consultations et soins", "Optique", "Mutuelles",
+        "Achats en ligne", "Vêtements", "Maison et bricolage", "Sport et équipement", "Autres achats",
+        "Versement épargne", "Virement entre comptes", "Autres virements",
+        "Salaire", "Remboursements", "Autres revenus", "À préciser"
+    }
+    subcategory_rules = {}
+    for merchant, subcategory in original_subcategory_rules.items():
+        if (isinstance(merchant, str) and 4 <= len(merchant) <= 96
+                and merchant == merchant.upper()
+                and all(ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 " for ch in merchant)
+                and isinstance(subcategory, str) and subcategory in valid_subcategories):
+            subcategory_rules[merchant] = subcategory
     original_aliases = value.get("bankAliases") or {}
     if not isinstance(original_aliases, dict) or len(original_aliases) > 300:
         raise HTTPException(413, "Trop de noms de comptes bancaires.")
@@ -285,6 +310,7 @@ def sanitize_manual_state(value: dict) -> dict:
         "bankOverrides": bank_overrides,
         "bankAliases": bank_aliases,
         "categoryRules": category_rules,
+        "subcategoryRules": subcategory_rules,
     }
 
 
